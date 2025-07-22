@@ -3,4 +3,8 @@ autotest-output/
 output_png/
 NIDAP_RSW_env_mirror/
 __pycache__/
-.DS_Store/
+.DS_Store
+*/.DS_Store/
+test_repo/
+nidap_exporter/Py_to_jupyter/expirement.ipynb
+.lintr.R

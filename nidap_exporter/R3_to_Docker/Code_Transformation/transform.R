@@ -11,7 +11,7 @@ library(stringr)
 
 
 # Body
-transform_pipeline <- function(pipe_R, 
+transform_pipeline <- function(pipe_R, #pipeline.R, file created when exporting to git 
                                pipeline_dir, 
                                package_prfix, 
                                branch, 
@@ -34,10 +34,8 @@ transform_pipeline <- function(pipe_R,
   newhash <- list()
   outhash <- list()
 
-
   this_function_out = NA
   this_function_in = list()
-
 
   functions <- list()
 

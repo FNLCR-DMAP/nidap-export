@@ -21,7 +21,7 @@ report_differences <- function(target, new){
     rownames(target) <- NULL
     names(new) <- gsub("\\.", "_", names(new))
     colnames(new) <- gsub("-", ".", colnames(new))
-    Comparison_results <- dplyr::all_equal(target %>% 
+    Comparison_results <- dplyr::all_equal(target %>%  
                                              mutate_if(is.numeric, round, 7) %>%  
                                              mutate_if(is.factor, as.character), 
                                            new %>% mutate_if(is.numeric, round, 7) %>% 

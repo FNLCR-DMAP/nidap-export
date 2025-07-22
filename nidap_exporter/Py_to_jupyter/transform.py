@@ -2,10 +2,9 @@ import json
 from pathlib import Path
 import ast 
 from collections import defaultdict 
+from ast_code_transforms import remove_Foundry_isms
 
 def get_func_dependencies(funcs):
-
-
     dag_list = []
     name_output_mapping = {}
 
@@ -45,6 +44,11 @@ def get_func_dependencies(funcs):
     return dag_list
 
 def get_dag(funcs):
+    '''
+    Returns a list of dictionaries representing the DAG of functions.
+    Each item in the top level list is the root of a DAG
+    Each node has the name of the function, its AST representation, and its children.
+    '''
     output_to_func = {func["output_rid"]: func["name"] for func in funcs}
     dependents = defaultdict(list)
 
@@ -62,13 +66,13 @@ def get_dag(funcs):
         if downstream:
             return {
                 "name": func["name"],
-                "ast_func": func["function"],
+                "function": func["function"],
                 "children": [build_tree(child) for child in downstream]
             }
         else:
             return {
                 "name": func["name"],
-                "ast_func": func["function"],
+                "function": func["function"],
                 "children": []
             }
 
@@ -88,7 +92,7 @@ def dag_to_jupyter(dag, output_file):
         md_text = f"{'#'*depth} {func['name']}"
         cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
         
-        code_text = ast.unparse(func["ast_func"])
+        code_text = ast.unparse(func["function"])
         cells.append(nbf.v4.new_code_cell(code_text))
 
         for c in func["children"]:
@@ -105,7 +109,18 @@ def dag_to_jupyter(dag, output_file):
     print(f"num cells: {len(cells)/2}")
     nbf.write(nb, output_file)
 
-def workbook_to_jupyter(repo_dir):
+def remove_foundry_artifacts(func_list):
+    print(func_list)
+    foundry_remover = remove_Foundry_isms()
+    for func in func_list:
+        pass
+        # func["function"] = foundry_remover.visit(func["function"])
+        # ast.fix_missing_locations(func["function"]) 
+
+    return func_list
+
+
+def main(repo_dir):
 
     python_file = repo_dir / "pipeline.py"
     
@@ -113,6 +128,7 @@ def workbook_to_jupyter(repo_dir):
         code = f.read()
 
     #this is a syntax error apparantly. 
+    #it shows up between the decorators
     code = code.replace("from pyspark.sql.types import *", "") 
     tree = ast.parse(code)
     
@@ -120,6 +136,9 @@ def workbook_to_jupyter(repo_dir):
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
 
     func_list = get_func_dependencies(named_funcs.values())
+    print(func_list)
+    func_list = remove_foundry_artifacts(func_list)
+
     print(f"found {len(func_list)} functions")
     dag = get_dag(func_list)
 
@@ -129,6 +148,6 @@ def workbook_to_jupyter(repo_dir):
 
 
 if __name__ == "__main__":
-    workbook_to_jupyter(
+    main(
         Path("/Users/frenchth/Foundry_Migration/workbook-migration/pipeline-extractor-python/nidap-export/test_repo/SPAC-v0-9-0-SCIMAP-Workbook")
     )
