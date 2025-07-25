@@ -2,9 +2,15 @@ import json
 from pathlib import Path
 import ast 
 from collections import defaultdict 
-from ast_code_transforms import remove_Foundry_isms
+# from ast_code_transforms import remove_Foundry_isms
+# from ast_code_transforms import RemoveSpecificAssign
+from ast_code_transforms import configure_output_pickles
+from ast_code_transforms import get_output_file_name
+import logging
+logger = logging.getLogger(__name__)
 
-def get_func_dependencies(funcs):
+
+def get_func_metadata(funcs):
     dag_list = []
     name_output_mapping = {}
 
@@ -18,28 +24,32 @@ def get_func_dependencies(funcs):
                         transform_dec = dec
 
             if transform_dec is None:
-                print(f"Function {fun.name} does not have the transform_pandas decorator")
+                logger.error(f"Function {fun.name} does not have the transform_pandas decorator")
                 continue
 
             input_funcs = [kw for kw in transform_dec.keywords if kw.value.func.id == "Input"]
-            has_input =  transform_dec.keywords and input_funcs
-
+            input_var_rid_mapping = { kw.arg:kw.value.keywords[0].value.value for kw in input_funcs}
             has_output = transform_dec.args and transform_dec.args[0].func.id == "Output"
             
-            dag_list.append(
-                {
+            func_metadata = {
                     "name": fun.name,
                     "input_rids": [kw.value.keywords[0].value.value for kw in input_funcs],
                     "output_rid": transform_dec.args[0].keywords[0].value.value if has_output else None,
+                    "input_var_rid_mapping": input_var_rid_mapping,
                     "function": fun
 
-                }
-            )
+            }
+            out_file_name = get_output_file_name(fun, logger)
+            out_file_name_suffix = out_file_name.split(".")[-1]
+            out_file_name_prefix = out_file_name.split(".")[0]
+            out_file_name = f"{out_file_name_prefix}-{func_metadata['output_rid']}.{out_file_name_suffix}"
+            func_metadata["output_file_name"] = out_file_name
+            dag_list.append(func_metadata)
 
             name_output_mapping[transform_dec.args[0].keywords[0].value.value] = fun.name
             
         else:
-            print(f"Function {fun.name} has no decorators")
+            logger.info(f"Function {fun.name} has no decorators")
     
     return dag_list
 
@@ -90,6 +100,7 @@ def dag_to_jupyter(dag, output_file):
 
     def add_cells(func, depth):
         md_text = f"{'#'*depth} {func['name']}"
+        #TODO add links to children in markdown 
         cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
         
         code_text = ast.unparse(func["function"])
@@ -97,7 +108,7 @@ def dag_to_jupyter(dag, output_file):
 
         for c in func["children"]:
             add_cells(c, depth + 1)
-
+    #TODO implement topological sort for DAG
     for root in dag:
         if not root["children"]:
             #todo throw error?
@@ -110,17 +121,20 @@ def dag_to_jupyter(dag, output_file):
     nbf.write(nb, output_file)
 
 def remove_foundry_artifacts(func_list):
-    print(func_list)
-    foundry_remover = remove_Foundry_isms()
+    
+    
     for func in func_list:
-        pass
-        # func["function"] = foundry_remover.visit(func["function"])
-        # ast.fix_missing_locations(func["function"]) 
+        logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
+        func["function"] = configure_output_pickles(func, func_list, logger)
+
+        ast.fix_missing_locations(func["function"]) 
 
     return func_list
 
 
 def main(repo_dir):
+
+    logging.basicConfig(level=logging.DEBUG)
 
     python_file = repo_dir / "pipeline.py"
     
@@ -135,16 +149,19 @@ def main(repo_dir):
     all_code = [node for node in tree.body]
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
 
-    func_list = get_func_dependencies(named_funcs.values())
-    print(func_list)
-    func_list = remove_foundry_artifacts(func_list)
-
-    print(f"found {len(func_list)} functions")
-    dag = get_dag(func_list)
-
+    #TODO get template names and add them to the function metadata
+    func_list = get_func_metadata(named_funcs.values())
+    print(func_list[1])
     
+    # notebook_file = repo_dir / "pipeline-unedited.ipynb"
+    # dag = get_dag(func_list)
+    # dag_to_jupyter(dag, notebook_file)
+
+
     notebook_file = repo_dir / "pipeline.ipynb"
-    dag_to_jupyter(dag, notebook_file)
+    func_list_de_foundry = remove_foundry_artifacts(func_list)
+    dag_de_foundry = get_dag(func_list_de_foundry)
+    dag_to_jupyter(dag_de_foundry, notebook_file)
 
 
 if __name__ == "__main__":
