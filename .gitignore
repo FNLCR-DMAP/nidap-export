@@ -8,3 +8,4 @@ __pycache__/
 test_repo/
 nidap_exporter/Py_to_jupyter/expirement.ipynb
 .lintr.R
+function_metadata

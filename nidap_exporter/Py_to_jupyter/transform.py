@@ -2,16 +2,27 @@ import json
 from pathlib import Path
 import ast 
 from collections import defaultdict 
+import os
 # from ast_code_transforms import remove_Foundry_isms
 # from ast_code_transforms import RemoveSpecificAssign
-from ast_code_transforms import configure_output_pickles
-from ast_code_transforms import get_output_file_name
+from ast_code_transforms import configure_pickles
+from ast_code_transforms import get_output_file_info
+from ast_code_transforms import configure_default_args
+from ast_code_transforms import get_func_args_metadata
+from ast_code_transforms import configure_func_calls
+from ast_code_transforms import configure_non_function_output
+from ast_code_transforms import get_function_calls
+from ast_code_transforms import remove_foundry_artifacts
 import logging
+import pprint
+from graphlib import TopologicalSorter
+
+
 logger = logging.getLogger(__name__)
 
 
 def get_func_metadata(funcs):
-    dag_list = []
+    func_data = {}
     name_output_mapping = {}
 
     for fun in funcs:
@@ -30,45 +41,54 @@ def get_func_metadata(funcs):
             input_funcs = [kw for kw in transform_dec.keywords if kw.value.func.id == "Input"]
             input_var_rid_mapping = { kw.arg:kw.value.keywords[0].value.value for kw in input_funcs}
             has_output = transform_dec.args and transform_dec.args[0].func.id == "Output"
-            
+             
             func_metadata = {
                     "name": fun.name,
                     "input_rids": [kw.value.keywords[0].value.value for kw in input_funcs],
                     "output_rid": transform_dec.args[0].keywords[0].value.value if has_output else None,
                     "input_var_rid_mapping": input_var_rid_mapping,
                     "function": fun
-
             }
-            out_file_name = get_output_file_name(fun, logger)
-            out_file_name_suffix = out_file_name.split(".")[-1]
-            out_file_name_prefix = out_file_name.split(".")[0]
-            out_file_name = f"{out_file_name_prefix}-{func_metadata['output_rid']}.{out_file_name_suffix}"
-            func_metadata["output_file_name"] = out_file_name
-            dag_list.append(func_metadata)
-
+            out_file_name, out_var_name = get_output_file_info(fun, logger)
+            if out_file_name:
+                out_file_name_suffix = out_file_name.split(".")[-1]
+                out_file_name_prefix = out_file_name.split(".")[0]
+                out_file_name = f"{out_file_name_prefix}-{func_metadata['output_rid']}.{out_file_name_suffix}"
+                func_metadata["output_file_name"] = out_file_name
+                func_metadata["output_var_name"] = out_var_name
+            else:
+                func_metadata["output_file_name"] = f"{fun.name}-{func_metadata['output_rid']}.pickle"
+                func_metadata["output_var_name"] = None
+            
+            func_metadata["args_metadata"] = get_func_args_metadata(fun, logger)
+            
+            func_data[fun.name] = func_metadata
             name_output_mapping[transform_dec.args[0].keywords[0].value.value] = fun.name
             
         else:
+            #TODO handle global functions
             logger.info(f"Function {fun.name} has no decorators")
     
-    return dag_list
+    return func_data
 
-def get_dag(funcs):
-    '''
-    Returns a list of dictionaries representing the DAG of functions.
-    Each item in the top level list is the root of a DAG
-    Each node has the name of the function, its AST representation, and its children.
-    '''
-    output_to_func = {func["output_rid"]: func["name"] for func in funcs}
-    dependents = defaultdict(list)
+def get_dependents(funcs):
+       
+    output_to_func = {funcs[func_name]["output_rid"]: func_name for func_name in funcs}
+    dependents = defaultdict(set)
 
-    for func in funcs:
-        if func["input_rids"]:
-            for in_rid in func["input_rids"]:
+    for func_name in funcs:
+        if funcs[func_name]["input_rids"]:
+            for in_rid in funcs[func_name]["input_rids"]:
                 producer = output_to_func.get(in_rid)
                 if producer:
-                    dependents[producer].append(func)
-    
+                    dependents[producer].add(func_name)
+                else:
+                    dependents[func_name] = set()
+
+    return dependents
+
+def get_dag(funcs, dependents, logger):
+
     def build_tree(func):
         
         downstream = dependents.get(func["name"], None)
@@ -78,6 +98,7 @@ def get_dag(funcs):
                 "name": func["name"],
                 "function": func["function"],
                 "children": [build_tree(child) for child in downstream]
+
             }
         else:
             return {
@@ -92,79 +113,139 @@ def get_dag(funcs):
     #TODO prune zero depth nodes? e.g. sticky notes
     return dag
 
-def dag_to_jupyter(dag, output_file):
+def dag_to_jupyter(func_list, notebook_file_path):
+
     import nbformat as nbf
-    
     nb = nbf.v4.new_notebook()
     cells = []
 
-    def add_cells(func, depth):
-        md_text = f"{'#'*depth} {func['name']}"
-        #TODO add links to children in markdown 
-        cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
-        
-        code_text = ast.unparse(func["function"])
-        cells.append(nbf.v4.new_code_cell(code_text))
+    for func in func_list:
+        if "function" in func:
+            md_text = f"{'##'} {func['name']}"
+            #TODO add links to children in markdown 
+            cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
+            
+            code_text = ast.unparse(func["function"])
+            call_text = ast.unparse(func["func_call"])
+            cells.append(nbf.v4.new_code_cell(code_text))
+            cells.append(nbf.v4.new_code_cell(call_text))
 
-        for c in func["children"]:
-            add_cells(c, depth + 1)
-    #TODO implement topological sort for DAG
-    for root in dag:
-        if not root["children"]:
-            #todo throw error?
-            continue
-        else:
-            add_cells(root, 1)
     
     nb["cells"] = cells
     print(f"num cells: {len(cells)/2}")
-    nbf.write(nb, output_file)
+    nbf.write(nb, notebook_file_path)
 
-def remove_foundry_artifacts(func_list):
+def configure_function(func_dict):
     
-    
-    for func in func_list:
-        logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
-        func["function"] = configure_output_pickles(func, func_list, logger)
+    for func_name in func_dict:
+        func_dict[func_name]["function"] = remove_foundry_artifacts(func_dict[func_name]["function"], logger) 
+        for key in func_dict[func_name]["args_metadata"]:
+            # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
+            func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
+            func_dict[func_name]["function"] = func
+            func_dict[func_name]["default_args"] = default_args
 
-        ast.fix_missing_locations(func["function"]) 
+            func_dict[func_name]["function"] = configure_pickles(
+                func_dict[func_name], 
+                key, 
+                func_dict[func_name]["args_metadata"][key], 
+                logger
+            )
+            # func_dict[func_name]["function"] = configure_pickles(
+            #     func_dict[func_name], 
+            #     key, 
+            #     func_dict[func_name]["args_metadata"][key], 
+            #     logger
+            # )
+            
+            if func_dict[func_name]["args_metadata"][key]["arg_type"] == "sub_func_call":
+                func_dict[func_name]["function"] = configure_func_calls(
+                    func_dict[func_name], 
+                    key, 
+                    func_dict[func_name]["args_metadata"][key], 
+                    logger
+                )
+            
+            # func["function"] = configure_default_params(func, logger)
+            ast.fix_missing_locations(func_dict[func_name]["function"]) 
+            func_dict[func_name]["function"] = configure_non_function_output(
+                func_dict[func_name]["function"],  
+                func_dict[func_name]["args_metadata"],
+                logger
+            )
 
-    return func_list
+    return func_dict
 
 
 def main(repo_dir):
 
-    logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.INFO)
 
     python_file = repo_dir / "pipeline.py"
     
     with open(python_file, 'r') as f:
         code = f.read()
-
     #this is a syntax error apparantly. 
     #it shows up between the decorators
     code = code.replace("from pyspark.sql.types import *", "") 
     tree = ast.parse(code)
     
     all_code = [node for node in tree.body]
+    #TODO account for global imports e.g. def spell_out_special_characters(text):
+
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
+    
+    # os.mkdir(repo_dir / "data")
+
+    manual_datasets = { #assuming these are manually put in the data directory
+        "mcmicro_output_annotation": {
+            "name": "mcmicro_output_annotation",
+            # "input_file_path": repo_dir / "data" / "updated_mcmicro_output_with_detailed_and_broad_cell_types.csv",
+            "input_rids": [],
+            "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
+            "output_file_name": str(repo_dir / "data" / "updated_mcmicro_output_with_detailed_and_broad_cell_types.csv")
+            },
+        "rename_observations" : {
+            "name": "rename_observations",
+            "input_rids": [],
+            # "input_file_path": repo_dir / "data" / "rename_observations-transform_output.pickle",
+            "output_rid": "ri.foundry.main.dataset.628a0f9f-7dbd-4841-8f9b-84ec1562bcc3",
+            "output_file_name": str(repo_dir / "data" / "rename_observations-transform_output.pickle")
+        }
+    } 
+
+
 
     #TODO get template names and add them to the function metadata
     func_list = get_func_metadata(named_funcs.values())
-    print(func_list[1])
-    
-    # notebook_file = repo_dir / "pipeline-unedited.ipynb"
-    # dag = get_dag(func_list)
-    # dag_to_jupyter(dag, notebook_file)
-
 
     notebook_file = repo_dir / "pipeline.ipynb"
-    func_list_de_foundry = remove_foundry_artifacts(func_list)
-    dag_de_foundry = get_dag(func_list_de_foundry)
-    dag_to_jupyter(dag_de_foundry, notebook_file)
+    func_dict_cleaned = configure_function(func_list)
+    func_dict_cleaned = {**func_dict_cleaned, **manual_datasets}
+    func_dict_cleaned = get_function_calls(func_dict_cleaned, logger)
+    
+
+    with open('function_metadata', 'w') as f:
+        pprint.pprint(func_dict_cleaned, stream=f)
+    
+    dependants = get_dependents(func_dict_cleaned)
+    
+    ts = TopologicalSorter(dependants)
+    sorted = list(ts.static_order())
+    sorted.reverse()
+
+    #TODO update code workbook utils.utils import text to value lines
+    
+    func_list = []
+    for func in sorted:
+        func_data = func_dict_cleaned[func]
+        func_list.append(func_data) 
+    
+    dag_to_jupyter(func_list, notebook_file)
 
 
 if __name__ == "__main__":
     main(
         Path("/Users/frenchth/Foundry_Migration/workbook-migration/pipeline-extractor-python/nidap-export/test_repo/SPAC-v0-9-0-SCIMAP-Workbook")
+
     )
