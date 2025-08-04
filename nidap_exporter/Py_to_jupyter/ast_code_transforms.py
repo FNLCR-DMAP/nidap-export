@@ -372,7 +372,6 @@ def configure_default_args(func_node, logger):
     default_param_end_index = 0
     import_end_index = get_import_end_index(func_node, logger)
 
-    logger.info(f"getting default args for {func_node.name}\nimport_end_index: {import_end_index}")
     for index, item in enumerate(func_node.body):
         
         if index < import_end_index:
@@ -435,7 +434,6 @@ def configure_non_function_output(func_node, args_metadata, logger):
                 
 
 def get_function_calls(func_dict, logger):
-    #TODO functions that have return statements 
     for func in func_dict:
         if "function" not in func_dict[func]: #is a manual datastet
             continue
@@ -448,9 +446,13 @@ def get_function_calls(func_dict, logger):
             )
         )
         for arg_name in func_dict[func]["input_var_rid_mapping"]:
-            
-            input_file = func_dict[arg_name]["output_file_name"]
-            node.value.args.append(ast.Constant(value=input_file))
+            if "output_file_name" in func_dict[arg_name]:
+                node.value.args.append(ast.Constant(value=func_dict[arg_name]["output_file_name"]))
+
+            else:
+                node.value.args.append(ast.Name(id=arg_name))
+                
+
         
         func_dict[func]["func_call"] = node
     
@@ -465,11 +467,18 @@ def is_load_pickle_from_dataset(node, logger):
     )
 
 def is_save_pickle_to_output(node, logger):
+
     return (
         isinstance(node, ast.Expr) and
         isinstance(node.value, ast.Call) and
         isinstance(node.value.func, ast.Name) and
         node.value.func.id == "save_pickle_to_output"
+    )
+
+def is_return_variable(node, logger):
+    return (
+        isinstance(node, ast.Return) and
+        isinstance(node.value, ast.Name)
     )
 
 def remove_foundry_artifacts(func, logger):
@@ -496,18 +505,30 @@ class Remove_Foundry_Artifacts(NodeTransformer):
 def configure_pickles(func_metadata, arg, arg_metadata, logger):
     
     func_node = func_metadata["function"]
-    #TODO account for     
-    # output = Transforms.get_output()
-    # output_fs = output.filesystem()
-    # with output_fs.open(csv_output_file, 'w') as f:
-        # final_df.to_csv(f, index=False)
+
 
     transformer = Configure_Pickles(arg, func_metadata, logger)
     func_node = transformer.visit(func_node)
     ast.fix_missing_locations(func_node)
-    
+    body = []
+    # return_node = None
+
+    for node in func_node.body:
+        if is_return_variable(node, logger):
+            return_var = node.value.id
+            new_node = ast.parse(
+                f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
+            ).body[0]
+            # logger.info(f"Adding pickle dump for {func_metadata['name']}")  
+            body.append(new_node)
+            body.append(node)
+        else:
+            body.append(node)
+    func_node.body = body
     func_node.decorator_list = []
     return func_node
+
+
 class Configure_Pickles(NodeTransformer):
 
     def __init__(self, arg, func_metadata, logger):
@@ -541,21 +562,28 @@ class Configure_Pickles(NodeTransformer):
 
             if open_type.startswith("w"):
                 
-                if isinstance (node.items[0].context_expr.args[0], ast.Name): # is a variable
+                if not isinstance(node.items[0].context_expr.args[0], ast.Name): # is not a variable
                     # self.logger.info(f"func metadata: {self.func_metadata}")
-                    if not node.items[0].context_expr.args[0].id == self.func_metadata["output_var_name"]:
-                        self.logger.warn(
-                            f"Function {self.func_metadata['name']} has a with open(variable), but the variable is not accounted for"
-                        )
-                    else:
-                        #we dont' need to do anything, this output variable has already been configured
-                        pass
-                else:
+                    # if not node.items[0].context_expr.args[0].id == self.func_metadata["output_var_name"]:
+                    #     self.logger.warn(
+                    #         f"Function {self.func_metadata['name']} has a with open(variable), but the variable is not accounted for"
+                    #     )
+                    # else:
+                    #     #we dont' need to do anything, this output variable has already been configured
+                    #     pass
+                # else:
                     # the arg to open is not a string, so we can assume it shoudl be the output file name
                     new = ast.parse(
                         f"open('{self.func_metadata['output_file_name']}', 'wb')"
                     ).body[0].value
                     node.items[0].context_expr = new
+                else:
+                    file_name, write_type = node.items[0].context_expr.args
+                    new = ast.parse(
+                        f"open({file_name.id}, '{write_type.value}')"
+                    ).body[0].value
+                    node.items[0].context_expr = new
+
         
             elif open_type.startswith("r"):
                 #reading in a dataset
@@ -586,7 +614,7 @@ class Configure_Pickles(NodeTransformer):
                 node
             )
         
-        #TODO load_pickle_from_dataset
+        
         elif ( is_load_pickle_from_dataset(node, self.logger) and 
                node.value.args[0].id == self.arg
         ):
@@ -596,7 +624,7 @@ class Configure_Pickles(NodeTransformer):
                 ast.parse(code).body[0],
                 node
             )
-        #TODO save_pickle_to_output
+    
         elif is_save_pickle_to_output(node, self.logger):
             code = f"with open('{self.func_metadata['output_file_name']}', 'wb') as f:"\
                    f"\n\tpickle.dump({node.value.args[1].id}, f)"
@@ -604,6 +632,8 @@ class Configure_Pickles(NodeTransformer):
                 ast.parse(code).body[0],
                 node
             )
+        
+
         #TODO *.files(), along with assignment
 
 

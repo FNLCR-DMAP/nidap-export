@@ -3,8 +3,6 @@ from pathlib import Path
 import ast 
 from collections import defaultdict 
 import os
-# from ast_code_transforms import remove_Foundry_isms
-# from ast_code_transforms import RemoveSpecificAssign
 from ast_code_transforms import configure_pickles
 from ast_code_transforms import get_output_file_info
 from ast_code_transforms import configure_default_args
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 def get_func_metadata(funcs):
     func_data = {}
     name_output_mapping = {}
-
+    global_funcs = []
     for fun in funcs:
         if fun.decorator_list:
             transform_dec = None
@@ -67,14 +65,16 @@ def get_func_metadata(funcs):
             
         else:
             #TODO handle global functions
-            logger.info(f"Function {fun.name} has no decorators")
+            logger.info(f"Function {fun.name} added to global funcs")
+            global_funcs.append(fun)
     
-    return func_data
+    return func_data, global_funcs
 
 def get_dependents(funcs):
        
     output_to_func = {funcs[func_name]["output_rid"]: func_name for func_name in funcs}
     dependents = defaultdict(set)
+    root_nodes = []
 
     for func_name in funcs:
         if funcs[func_name]["input_rids"]:
@@ -85,7 +85,14 @@ def get_dependents(funcs):
                 else:
                     dependents[func_name] = set()
 
-    return dependents
+    for has_child_func in dependents:
+        has_parent = any([d for d in dependents if has_child_func in dependents[d]])
+        if not has_parent:
+            root_nodes.append(has_child_func)
+
+
+
+    return dependents, root_nodes
 
 def get_dag(funcs, dependents, logger):
 
@@ -113,13 +120,45 @@ def get_dag(funcs, dependents, logger):
     #TODO prune zero depth nodes? e.g. sticky notes
     return dag
 
-def dag_to_jupyter(func_list, notebook_file_path):
+def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook_file_path):
 
     import nbformat as nbf
     nb = nbf.v4.new_notebook()
+    
     cells = []
+    
+    # func_list = []
+    # for func in sorted:
+    #     if func not in root_nodes:
+    #         func_data = func_dict_cleaned[func]
+    #         func_list.append(func_data)
 
-    for func in func_list:
+    cells.append(nbf.v4.new_markdown_cell("## global functions", metadata={"collapsed":True}))
+    for func in global_func_list:
+        code_text = ast.unparse(func)
+        cells.append(nbf.v4.new_code_cell(code_text))
+
+    
+    opening_code_text = "" 
+    for node in root_nodes:
+        print(node)    
+        if node in all_funcs and "function" in all_funcs[node]:
+            opening_code_text += "\n"
+            print(f"{node} in func list")
+            print( all_funcs[node])
+            all_funcs[node]["function"].name = f"get_{node}"
+            all_funcs[node]["function"].decorator_list = []
+            opening_code_text += ast.unparse(all_funcs[node]["function"])
+            opening_code_text += f"\n{node} = get_{node}()"
+            opening_code_text += f"\n"
+            func_order.remove(node)
+        else:
+            opening_code_text += f"\n{node} = /path/to/your/data\n"
+    
+    cells.append(nbf.v4.new_code_cell(opening_code_text, metadata={"collapsed":True}))
+
+    for f in func_order:
+        func = all_funcs[f]
         if "function" in func:
             md_text = f"{'##'} {func['name']}"
             #TODO add links to children in markdown 
@@ -151,12 +190,6 @@ def configure_function(func_dict):
                 func_dict[func_name]["args_metadata"][key], 
                 logger
             )
-            # func_dict[func_name]["function"] = configure_pickles(
-            #     func_dict[func_name], 
-            #     key, 
-            #     func_dict[func_name]["args_metadata"][key], 
-            #     logger
-            # )
             
             if func_dict[func_name]["args_metadata"][key]["arg_type"] == "sub_func_call":
                 func_dict[func_name]["function"] = configure_func_calls(
@@ -191,7 +224,6 @@ def main(repo_dir):
     tree = ast.parse(code)
     
     all_code = [node for node in tree.body]
-    #TODO account for global imports e.g. def spell_out_special_characters(text):
 
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
     
@@ -203,21 +235,17 @@ def main(repo_dir):
             # "input_file_path": repo_dir / "data" / "updated_mcmicro_output_with_detailed_and_broad_cell_types.csv",
             "input_rids": [],
             "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
-            "output_file_name": str(repo_dir / "data" / "updated_mcmicro_output_with_detailed_and_broad_cell_types.csv")
             },
         "rename_observations" : {
             "name": "rename_observations",
             "input_rids": [],
             # "input_file_path": repo_dir / "data" / "rename_observations-transform_output.pickle",
             "output_rid": "ri.foundry.main.dataset.628a0f9f-7dbd-4841-8f9b-84ec1562bcc3",
-            "output_file_name": str(repo_dir / "data" / "rename_observations-transform_output.pickle")
         }
-    } 
-
-
+    }
 
     #TODO get template names and add them to the function metadata
-    func_list = get_func_metadata(named_funcs.values())
+    func_list, global_funcs = get_func_metadata(named_funcs.values())
 
     notebook_file = repo_dir / "pipeline.ipynb"
     func_dict_cleaned = configure_function(func_list)
@@ -228,20 +256,16 @@ def main(repo_dir):
     with open('function_metadata', 'w') as f:
         pprint.pprint(func_dict_cleaned, stream=f)
     
-    dependants = get_dependents(func_dict_cleaned)
-    
+    dependants, root_nodes = get_dependents(func_dict_cleaned)
+
     ts = TopologicalSorter(dependants)
+
     sorted = list(ts.static_order())
     sorted.reverse()
 
     #TODO update code workbook utils.utils import text to value lines
     
-    func_list = []
-    for func in sorted:
-        func_data = func_dict_cleaned[func]
-        func_list.append(func_data) 
-    
-    dag_to_jupyter(func_list, notebook_file)
+    dag_to_jupyter(sorted, func_dict_cleaned, root_nodes,  global_funcs, notebook_file)
 
 
 if __name__ == "__main__":
