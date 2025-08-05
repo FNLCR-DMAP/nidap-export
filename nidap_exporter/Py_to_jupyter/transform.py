@@ -1,3 +1,4 @@
+import sys
 import json
 from pathlib import Path
 import ast 
@@ -295,6 +296,6 @@ def main(repo_dir):
 
 if __name__ == "__main__":
     main(
-        Path("/Users/frenchth/Foundry_Migration/workbook-migration/pipeline-extractor-python/nidap-export/test_repo/SPAC-v0-9-0-SCIMAP-Workbook")
-
+        # Path("/Users/frenchth/Foundry_Migration/workbook-migration/pipeline-extractor-python/nidap-export/test_repo/SPAC-v0-9-0-SCIMAP-Workbook")
+        sys.argv[1]
     )
