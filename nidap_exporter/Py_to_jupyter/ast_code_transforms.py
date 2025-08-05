@@ -429,7 +429,7 @@ def configure_non_function_output(func_node, args_metadata, logger):
     return func_node
 
 
-def get_function_calls(func_dict, logger):
+def get_function_calls(func_dict, roots, logger):
     for func in func_dict:
         if "function" not in func_dict[func]: #is a manual datastet
             continue
@@ -441,8 +441,9 @@ def get_function_calls(func_dict, logger):
                 keywords=[]
             )
         )
+        
         for arg_name in func_dict[func]["input_var_rid_mapping"]:
-            if "output_file_name" in func_dict[arg_name]:
+            if "output_file_name" in func_dict[arg_name] and not arg_name in roots:
                 node.value.args.append(ast.Constant(value=func_dict[arg_name]["output_file_name"]))
 
             else:

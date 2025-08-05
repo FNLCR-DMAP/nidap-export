@@ -188,33 +188,33 @@ def configure_function(func_dict):
                     func_dict[func_name]["args_metadata"][arg],
                     logger)
                 # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
-            else:
-                func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
-                func_dict[func_name]["function"] = func
-                func_dict[func_name]["default_args"] = default_args
+            # else:
+            func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
+            func_dict[func_name]["function"] = func
+            func_dict[func_name]["default_args"] = default_args
 
-                func_dict[func_name]["function"] = configure_pickles(
+            func_dict[func_name]["function"] = configure_pickles(
+                func_dict[func_name], 
+                arg, 
+                func_dict[func_name]["args_metadata"][arg], 
+                logger
+            )
+            
+            if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
+                func_dict[func_name]["function"] = configure_func_calls(
                     func_dict[func_name], 
                     arg, 
                     func_dict[func_name]["args_metadata"][arg], 
                     logger
                 )
-                
-                if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
-                    func_dict[func_name]["function"] = configure_func_calls(
-                        func_dict[func_name], 
-                        arg, 
-                        func_dict[func_name]["args_metadata"][arg], 
-                        logger
-                    )
-                
-                # func["function"] = configure_default_params(func, logger)
-                ast.fix_missing_locations(func_dict[func_name]["function"]) 
-                func_dict[func_name]["function"] = configure_non_function_output(
-                    func_dict[func_name]["function"],  
-                    func_dict[func_name]["args_metadata"],
-                    logger
-                )
+            
+            # func["function"] = configure_default_params(func, logger)
+            ast.fix_missing_locations(func_dict[func_name]["function"]) 
+            func_dict[func_name]["function"] = configure_non_function_output(
+                func_dict[func_name]["function"],  
+                func_dict[func_name]["args_metadata"],
+                logger
+            )
 
     return func_dict
 
@@ -278,9 +278,9 @@ def main(repo_dir):
     func_dict_cleaned = configure_function(func_list)
 
     func_dict_cleaned = {**func_dict_cleaned, **manual_datasets}
-    func_dict_cleaned = get_function_calls(func_dict_cleaned, logger)
     
     dependants, root_nodes = get_dependents(func_dict_cleaned)
+    func_dict_cleaned = get_function_calls(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
     # pprint.pprint(dependants)
     ts = TopologicalSorter(dependants)
