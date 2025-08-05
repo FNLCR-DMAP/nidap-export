@@ -502,7 +502,13 @@ def is_file_path_list(node, logger):
         isinstance(node.targets[0], ast.Name) and
         node.targets[0].id == ("file_paths_list")
     )
-
+def is_check_if_fs_not_none(node, logger):
+    return (
+        isinstance(node, ast.If) and
+        isinstance(node.test, ast.Compare ) and
+        isinstance(node.test.left, ast.Name) and
+        node.test.left.id == "output_fs"
+    )
 class Remove_Foundry_Artifacts(NodeTransformer):
     def __init__(self, logger):
         self.logger = logger
@@ -512,6 +518,12 @@ class Remove_Foundry_Artifacts(NodeTransformer):
              is_get_files(node, self.logger)
         ):
             return None
+        elif (
+            is_check_if_fs_not_none(node, self.logger) and 
+            is_foundry_fs_with_open(node.body[0], self.logger)
+        ):
+            node = node.body[0]
+
         return super().generic_visit(node)
 def configure_pickles(func_metadata, arg, arg_metadata, logger):
     
