@@ -334,9 +334,6 @@ def get_func_args_metadata(func_node, logger):
     
     return func_args_metadata
 
-
-
-
 def get_import_end_index (func_node, logger):
     """
     Returns the index in the function body where imports end.
@@ -415,7 +412,6 @@ def configure_default_args(func_node, logger):
     
     return func_node, default_args
 
-
 def configure_non_function_output(func_node, args_metadata, logger):
     
     for node in ast.walk(func_node):
@@ -431,7 +427,7 @@ def configure_non_function_output(func_node, args_metadata, logger):
                 node.items[0].context_expr.func = ast.Name(id="open", ctx=ast.Load())
     
     return func_node
-                
+
 
 def get_function_calls(func_dict, logger):
     for func in func_dict:
@@ -488,6 +484,23 @@ def remove_foundry_artifacts(func, logger):
     ast.fix_missing_locations(func)
     
     return func
+def is_select_path_collect(node, logger):
+    return (        
+        isinstance(node, ast.Assign) and
+        isinstance(node.value, ast.Call) and
+        isinstance(node.value.func, ast.Attribute) and
+        isinstance(node.value.func.value, ast.Call) and
+        isinstance(node.value.func.value.func, ast.Attribute) and
+        node.value.func.value.func.attr == 'select' and
+        node.value.func.attr == 'collect'
+    )
+def is_file_path_list(node, logger):
+    return(
+        isinstance(node, ast.Assign) and
+        len(node.targets) == 1 and
+        isinstance(node.targets[0], ast.Name) and
+        node.targets[0].id == ("file_paths_list")
+    )
 
 class Remove_Foundry_Artifacts(NodeTransformer):
     def __init__(self, logger):
@@ -499,9 +512,6 @@ class Remove_Foundry_Artifacts(NodeTransformer):
         ):
             return None
         return super().generic_visit(node)
-    
-
-
 def configure_pickles(func_metadata, arg, arg_metadata, logger):
     
     func_node = func_metadata["function"]
@@ -527,8 +537,6 @@ def configure_pickles(func_metadata, arg, arg_metadata, logger):
     func_node.body = body
     func_node.decorator_list = []
     return func_node
-
-
 class Configure_Pickles(NodeTransformer):
 
     def __init__(self, arg, func_metadata, logger):
@@ -632,10 +640,205 @@ class Configure_Pickles(NodeTransformer):
                 ast.parse(code).body[0],
                 node
             )
-        
-
-        #TODO *.files(), along with assignment
-
 
         return super().generic_visit(node)            
+
+def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
+
+    transformer = Configure_Load_CSV_Files(arg, func_arg_metadata, logger)
+    # print(f"configuring node: {ast.unparse(node)}")
+    node = transformer.visit(node)
+    # print(f"configured node: {ast.unparse(node)}")
+    ast.fix_missing_locations(node)
+    
+    return node
+
+# class Configure_Load_CSV_Files(NodeTransformer):
+#     def __init__(self, logger):
+#         self.logger = logger
         
+
+#     def generic_visit(self, node):
+
+#         if is_select_path_collect(node, self.logger):
+#             return None
+#         elif is_file_path_list(node, self.logger):
+#             return None
+#         elif is_foundry_fs_with_open(node, self.logger):
+#             withitem = node.items[0]
+
+#             new_node = ast.Call(
+#                 func=ast.Name(id='open', ctx=ast.Load()),
+#                 args=[
+#                     withitem.context_expr.args[0],  # file_name
+#                     ast.Constant(value='r')         # 'r' mode
+#                 ],
+#                 keywords=[]
+#             )
+#             print(f"new with open node: {ast.unparse(new_node)}")
+#             node.items[0].context_expr = new_node
+#             print(f"new with open node: {ast.unparse(node)}")
+        
+#         return super().generic_visit(node)
+    
+
+class Configure_Load_CSV_Files(NodeTransformer):
+    def __init__(self, arg, func_arg_metadata, logger):
+        
+        self.logger = logger
+        self.func_arg_metadata = func_arg_metadata
+        self.arg = arg
+
+    def visit_Assign(self, node):
+        if (is_select_path_collect(node, self.logger) and 
+            self.func_arg_metadata["arg_type"] == "foundry_fs_pickle_load"
+        ):
+            
+            new_node = ast.parse(f"file_paths_list = {self.arg}").body[0]
+
+            return ast.copy_location(new_node, node)
+        
+        if is_file_path_list(node, self.logger):
+            return None
+        return self.generic_visit(node)
+
+    def visit_With(self, node):
+        if is_foundry_fs_with_open(node, self.logger):
+            withitem = node.items[0]
+            new_node = ast.Call(
+                func=ast.Name(id='open', ctx=ast.Load()),
+                args=[
+                    withitem.context_expr.args[0],  # file_name
+                    ast.Constant(value='r')
+                ],
+                keywords=[]
+            )
+            withitem.context_expr = new_node
+        return self.generic_visit(node)
+    
+
+def spark_to_pandas_root_nodes(funcs, root_nodes, logger):
+    for node in root_nodes:
+        if "function" in funcs[node]:
+            transformer = SparkToPandasTransformer()
+            funcs[node]["function"] = transformer.visit(funcs[node]["function"])
+            ast.fix_missing_locations(funcs[node]["function"])
+    
+    return funcs
+
+
+# class SparkToPandasTransformer(ast.NodeTransformer):
+#     def __init__(self):
+#         self.columns = []
+
+#     def visit_FunctionDef(self, node):
+#         # Look for schema assignment first
+#         for stmt in node.body:
+#             if (
+#                 isinstance(stmt, ast.Assign) and
+#                 isinstance(stmt.value, ast.Call) and
+#                 isinstance(stmt.value.func, ast.Name) and
+#                 stmt.value.func.id == 'StructType'
+#             ):
+#                 # Get list of StructField(...) calls
+#                 fields = stmt.value.args[0].elts  # assuming StructType([...])
+#                 self.columns = [
+#                     field.args[0].value  # Extract column name string from StructField(...)
+#                     for field in fields
+#                     if isinstance(field, ast.Call) and field.func.id == 'StructField'
+#                 ]
+
+#         # Now modify the return statement
+#         for i, stmt in enumerate(node.body):
+#             if isinstance(stmt, ast.Return):
+#                 spark_call = stmt.value
+#                 if (
+#                     isinstance(spark_call, ast.Call) and
+#                     isinstance(spark_call.func, ast.Attribute) and
+#                     spark_call.func.attr == 'createDataFrame'
+#                 ):
+#                     # First argument is the data list
+#                     data_arg = spark_call.args[0]
+
+#                     # Create the new return value
+#                     new_call = ast.Call(
+#                         func=ast.Attribute(
+#                             value=ast.Name(id='pd', ctx=ast.Load()),
+#                             attr='DataFrame',
+#                             ctx=ast.Load()
+#                         ),
+#                         args=[],
+#                         keywords=[
+#                             ast.keyword(arg='data', value=data_arg),
+#                             ast.keyword(
+#                                 arg='columns',
+#                                 value=ast.List(
+#                                     elts=[ast.Constant(value=col) for col in self.columns],
+#                                     ctx=ast.Load()
+#                                 )
+#                             )
+#                         ]
+#                     )
+#                     node.body[i] = ast.Return(value=new_call)
+
+#         return node
+    
+class SparkToPandasTransformer(ast.NodeTransformer):
+    def __init__(self):
+        self.columns = []
+
+    def visit_FunctionDef(self, node):
+        new_body = []
+
+        for stmt in node.body:
+            # Detect schema assignment and extract column names
+            if (
+                isinstance(stmt, ast.Assign) and
+                isinstance(stmt.value, ast.Call) and
+                isinstance(stmt.value.func, ast.Name) and
+                stmt.value.func.id == 'StructType'
+            ):
+                # Extract column names from StructField
+                fields = stmt.value.args[0].elts
+                self.columns = [
+                    field.args[0].value
+                    for field in fields
+                    if isinstance(field, ast.Call) and field.func.id == 'StructField'
+                ]
+                continue  # Skip adding this line to the new body
+
+            # Replace Spark createDataFrame return with pd.DataFrame
+            elif isinstance(stmt, ast.Return):
+                spark_call = stmt.value
+                if (
+                    isinstance(spark_call, ast.Call) and
+                    isinstance(spark_call.func, ast.Attribute) and
+                    spark_call.func.attr == 'createDataFrame'
+                ):
+                    data_arg = spark_call.args[0]
+                    new_call = ast.Call(
+                        func=ast.Attribute(
+                            value=ast.Name(id='pd', ctx=ast.Load()),
+                            attr='DataFrame',
+                            ctx=ast.Load()
+                        ),
+                        args=[],
+                        keywords=[
+                            ast.keyword(arg='data', value=data_arg),
+                            ast.keyword(
+                                arg='columns',
+                                value=ast.List(
+                                    elts=[ast.Constant(value=col) for col in self.columns],
+                                    ctx=ast.Load()
+                                )
+                            )
+                        ]
+                    )
+                    new_body.append(ast.Return(value=new_call))
+                    continue  # Done with this stmt
+
+            # Keep anything else (just in case)
+            new_body.append(stmt)
+
+        node.body = new_body
+        return node

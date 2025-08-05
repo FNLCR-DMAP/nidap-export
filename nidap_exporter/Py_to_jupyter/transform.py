@@ -11,6 +11,8 @@ from ast_code_transforms import configure_func_calls
 from ast_code_transforms import configure_non_function_output
 from ast_code_transforms import get_function_calls
 from ast_code_transforms import remove_foundry_artifacts
+from ast_code_transforms import configure_load_csv_files
+from ast_code_transforms import spark_to_pandas_root_nodes
 import logging
 import pprint
 from graphlib import TopologicalSorter
@@ -133,19 +135,16 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
     #         func_data = func_dict_cleaned[func]
     #         func_list.append(func_data)
 
-    cells.append(nbf.v4.new_markdown_cell("## global functions", metadata={"collapsed":True}))
+    cells.append(nbf.v4.new_markdown_cell("# Global Functions", metadata={"collapsed":True}))
     for func in global_func_list:
         code_text = ast.unparse(func)
         cells.append(nbf.v4.new_code_cell(code_text))
 
-    
-    opening_code_text = "" 
+    cells.append(nbf.v4.new_markdown_cell("# Input Data", metadata={"collapsed":True}))
+    opening_code_text = "import pandas as pd\n" 
     for node in root_nodes:
-        print(node)    
         if node in all_funcs and "function" in all_funcs[node]:
             opening_code_text += "\n"
-            print(f"{node} in func list")
-            print( all_funcs[node])
             all_funcs[node]["function"].name = f"get_{node}"
             all_funcs[node]["function"].decorator_list = []
             opening_code_text += ast.unparse(all_funcs[node]["function"])
@@ -156,11 +155,13 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
             opening_code_text += f"\n{node} = /path/to/your/data\n"
     
     cells.append(nbf.v4.new_code_cell(opening_code_text, metadata={"collapsed":True}))
+    cells.append(nbf.v4.new_markdown_cell("# Code", metadata={"collapsed":True}))
+
 
     for f in func_order:
         func = all_funcs[f]
         if "function" in func:
-            md_text = f"{'##'} {func['name']}"
+            md_text = f"## {func['name']}\n{func['template']}"
             #TODO add links to children in markdown 
             cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
             
@@ -178,37 +179,62 @@ def configure_function(func_dict):
     
     for func_name in func_dict:
         func_dict[func_name]["function"] = remove_foundry_artifacts(func_dict[func_name]["function"], logger) 
-        for key in func_dict[func_name]["args_metadata"]:
-            # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
-            func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
-            func_dict[func_name]["function"] = func
-            func_dict[func_name]["default_args"] = default_args
+        
+        for arg in func_dict[func_name]["args_metadata"]:
+            if "Load CSV Files" in func_dict[func_name]["template"]:            
+                func_dict[func_name]["function"] = configure_load_csv_files(
+                    func_dict[func_name]["function"], 
+                    arg,
+                    func_dict[func_name]["args_metadata"][arg],
+                    logger)
+                # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
+            else:
+                func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
+                func_dict[func_name]["function"] = func
+                func_dict[func_name]["default_args"] = default_args
 
-            func_dict[func_name]["function"] = configure_pickles(
-                func_dict[func_name], 
-                key, 
-                func_dict[func_name]["args_metadata"][key], 
-                logger
-            )
-            
-            if func_dict[func_name]["args_metadata"][key]["arg_type"] == "sub_func_call":
-                func_dict[func_name]["function"] = configure_func_calls(
+                func_dict[func_name]["function"] = configure_pickles(
                     func_dict[func_name], 
-                    key, 
-                    func_dict[func_name]["args_metadata"][key], 
+                    arg, 
+                    func_dict[func_name]["args_metadata"][arg], 
                     logger
                 )
-            
-            # func["function"] = configure_default_params(func, logger)
-            ast.fix_missing_locations(func_dict[func_name]["function"]) 
-            func_dict[func_name]["function"] = configure_non_function_output(
-                func_dict[func_name]["function"],  
-                func_dict[func_name]["args_metadata"],
-                logger
-            )
+                
+                if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
+                    func_dict[func_name]["function"] = configure_func_calls(
+                        func_dict[func_name], 
+                        arg, 
+                        func_dict[func_name]["args_metadata"][arg], 
+                        logger
+                    )
+                
+                # func["function"] = configure_default_params(func, logger)
+                ast.fix_missing_locations(func_dict[func_name]["function"]) 
+                func_dict[func_name]["function"] = configure_non_function_output(
+                    func_dict[func_name]["function"],  
+                    func_dict[func_name]["args_metadata"],
+                    logger
+                )
 
     return func_dict
 
+def get_template_version(code, func_names, logger):
+    code = code.split("\n")
+    template_mapping = {}
+    for name in func_names:
+        for i, line in enumerate(code):
+            if f"def {name}(" in line:
+                if code[i-2].startswith("#"):
+                    template_comment = code[i-2].split("#")[1]
+                elif code[i-1].startswith("#"):
+                    template_comment = code[i-1].split("#")[1]
+                else:
+                    logger.warning(f"No template comment found for function {name}")
+                    template_comment = ""
+                
+                template_mapping[name] = template_comment
+                break
+    return template_mapping
 
 def main(repo_dir):
 
@@ -227,8 +253,8 @@ def main(repo_dir):
 
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
     
-    # os.mkdir(repo_dir / "data")
-
+    template_mapping = get_template_version(code, named_funcs.keys(), logger)
+    
     manual_datasets = { #assuming these are manually put in the data directory
         "mcmicro_output_annotation": {
             "name": "mcmicro_output_annotation",
@@ -244,20 +270,19 @@ def main(repo_dir):
         }
     }
 
-    #TODO get template names and add them to the function metadata
     func_list, global_funcs = get_func_metadata(named_funcs.values())
+    for func_name in func_list:
+        func_list[func_name]["template"] = template_mapping[func_name]
 
     notebook_file = repo_dir / "pipeline.ipynb"
     func_dict_cleaned = configure_function(func_list)
+
     func_dict_cleaned = {**func_dict_cleaned, **manual_datasets}
     func_dict_cleaned = get_function_calls(func_dict_cleaned, logger)
     
-
-    with open('function_metadata', 'w') as f:
-        pprint.pprint(func_dict_cleaned, stream=f)
-    
     dependants, root_nodes = get_dependents(func_dict_cleaned)
-
+    func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
+    # pprint.pprint(dependants)
     ts = TopologicalSorter(dependants)
 
     sorted = list(ts.static_order())
