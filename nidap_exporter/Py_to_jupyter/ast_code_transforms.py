@@ -666,34 +666,6 @@ def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
     
     return node
 
-# class Configure_Load_CSV_Files(NodeTransformer):
-#     def __init__(self, logger):
-#         self.logger = logger
-        
-
-#     def generic_visit(self, node):
-
-#         if is_select_path_collect(node, self.logger):
-#             return None
-#         elif is_file_path_list(node, self.logger):
-#             return None
-#         elif is_foundry_fs_with_open(node, self.logger):
-#             withitem = node.items[0]
-
-#             new_node = ast.Call(
-#                 func=ast.Name(id='open', ctx=ast.Load()),
-#                 args=[
-#                     withitem.context_expr.args[0],  # file_name
-#                     ast.Constant(value='r')         # 'r' mode
-#                 ],
-#                 keywords=[]
-#             )
-#             print(f"new with open node: {ast.unparse(new_node)}")
-#             node.items[0].context_expr = new_node
-#             print(f"new with open node: {ast.unparse(node)}")
-        
-#         return super().generic_visit(node)
-    
 
 class Configure_Load_CSV_Files(NodeTransformer):
     def __init__(self, arg, func_arg_metadata, logger):
@@ -739,62 +711,6 @@ def spark_to_pandas_root_nodes(funcs, root_nodes, logger):
     
     return funcs
 
-
-# class SparkToPandasTransformer(ast.NodeTransformer):
-#     def __init__(self):
-#         self.columns = []
-
-#     def visit_FunctionDef(self, node):
-#         # Look for schema assignment first
-#         for stmt in node.body:
-#             if (
-#                 isinstance(stmt, ast.Assign) and
-#                 isinstance(stmt.value, ast.Call) and
-#                 isinstance(stmt.value.func, ast.Name) and
-#                 stmt.value.func.id == 'StructType'
-#             ):
-#                 # Get list of StructField(...) calls
-#                 fields = stmt.value.args[0].elts  # assuming StructType([...])
-#                 self.columns = [
-#                     field.args[0].value  # Extract column name string from StructField(...)
-#                     for field in fields
-#                     if isinstance(field, ast.Call) and field.func.id == 'StructField'
-#                 ]
-
-#         # Now modify the return statement
-#         for i, stmt in enumerate(node.body):
-#             if isinstance(stmt, ast.Return):
-#                 spark_call = stmt.value
-#                 if (
-#                     isinstance(spark_call, ast.Call) and
-#                     isinstance(spark_call.func, ast.Attribute) and
-#                     spark_call.func.attr == 'createDataFrame'
-#                 ):
-#                     # First argument is the data list
-#                     data_arg = spark_call.args[0]
-
-#                     # Create the new return value
-#                     new_call = ast.Call(
-#                         func=ast.Attribute(
-#                             value=ast.Name(id='pd', ctx=ast.Load()),
-#                             attr='DataFrame',
-#                             ctx=ast.Load()
-#                         ),
-#                         args=[],
-#                         keywords=[
-#                             ast.keyword(arg='data', value=data_arg),
-#                             ast.keyword(
-#                                 arg='columns',
-#                                 value=ast.List(
-#                                     elts=[ast.Constant(value=col) for col in self.columns],
-#                                     ctx=ast.Load()
-#                                 )
-#                             )
-#                         ]
-#                     )
-#                     node.body[i] = ast.Return(value=new_call)
-
-#         return node
     
 class SparkToPandasTransformer(ast.NodeTransformer):
     def __init__(self):
@@ -855,3 +771,31 @@ class SparkToPandasTransformer(ast.NodeTransformer):
 
         node.body = new_body
         return node
+    
+
+def configure_imports(funcs, logger):
+    for func in funcs:
+        if "function" in funcs[func]:
+            transformer = ImportTransformer(logger)
+            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
+            ast.fix_missing_locations(funcs[func]["function"])
+    return funcs
+
+def is_code_workbook_utils_import(node, logger):
+    return(
+        isinstance(node, ast.ImportFrom) and
+        node.module == "code_workbook_utils.utils" 
+        # any(n in ["save_outputs", "parse_params","text_to_value"] for n in node.names)
+    )    
+
+class ImportTransformer(NodeTransformer):
+    def __init__(self, logger):
+        self.logger = logger
+
+
+    def generic_visit(self, node):
+        if is_code_workbook_utils_import(node, self.logger):
+            node.module = "spac.templates.template_utils"
+        
+        return super().generic_visit(node)
+        

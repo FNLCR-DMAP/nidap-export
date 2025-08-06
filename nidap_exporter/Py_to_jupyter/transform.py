@@ -14,6 +14,7 @@ from ast_code_transforms import get_function_calls
 from ast_code_transforms import remove_foundry_artifacts
 from ast_code_transforms import configure_load_csv_files
 from ast_code_transforms import spark_to_pandas_root_nodes
+from ast_code_transforms import configure_imports
 import logging
 import pprint
 from graphlib import TopologicalSorter
@@ -283,7 +284,8 @@ def main(repo_dir):
     dependants, root_nodes = get_dependents(func_dict_cleaned)
     func_dict_cleaned = get_function_calls(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
-    # pprint.pprint(dependants)
+    func_dict_cleaned = configure_imports(func_dict_cleaned, logger)
+    
     ts = TopologicalSorter(dependants)
 
     sorted = list(ts.static_order())
