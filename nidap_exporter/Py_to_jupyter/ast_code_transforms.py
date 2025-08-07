@@ -354,11 +354,26 @@ def configure_func_calls(func_metadata, arg, arg_metadata, logger):
     else:
         func_call_var = arg
 
-    
-    code = f"with open({arg}) as f:\n\t{func_call_var} = pickle.load(f)" 
+
+    code = f"with open({arg}, 'rb') as f:\n\t{func_call_var} = pickle.load(f)" 
     insert_index = get_import_end_index(func_node, logger)
     func_node.body.insert(insert_index, ast.parse(code).body[0])
-    #$1
+    
+    if "func_call_var" in arg_metadata:
+        new_body = []
+        # print(f"looking to remove {arg_metadata['func_call_var']}")
+        for node in func_node.body:
+            # print(ast.unparse(node))
+            if ( isinstance(node, ast.Assign) and
+                 len(node.targets) == 1 and
+                 isinstance(node.value, ast.Name) and
+                 node.targets[0].id == arg_metadata["func_call_var"]
+            ):
+                # print(f"removing {ast.unparse(node)}")
+                continue
+            else:
+                new_body.append(node)
+        func_node.body = new_body
     
     return func_node
 
@@ -442,7 +457,16 @@ def get_function_calls(func_dict, roots, logger):
             )
         )
         
-        for arg_name in func_dict[func]["input_var_rid_mapping"]:
+        # for arg_name in func_dict[func]["input_var_rid_mapping"]:
+        arg_order = [a.arg for a in func_dict[func]["function"].args.args ]
+        len_kwargs = len(func_dict[func]["function"].args.defaults)
+        if len_kwargs > 0:
+            arg_order = arg_order[:-len_kwargs]
+        
+        
+
+        for arg_name in arg_order:
+            # func_dict[func]["input_var_rid_mapping"]
             if "output_file_name" in func_dict[arg_name] and not arg_name in roots:
                 node.value.args.append(ast.Constant(value=func_dict[arg_name]["output_file_name"]))
 
@@ -525,19 +549,18 @@ class Remove_Foundry_Artifacts(NodeTransformer):
             node = node.body[0]
 
         return super().generic_visit(node)
-def configure_pickles(func_metadata, arg, arg_metadata, logger):
+def configure_pickles(func_metadata, arg, root_nodes, logger):
     
     func_node = func_metadata["function"]
 
-
-    transformer = Configure_Pickles(arg, func_metadata, logger)
+    transformer = Configure_Pickles(arg, func_metadata, root_nodes, logger)
     func_node = transformer.visit(func_node)
     ast.fix_missing_locations(func_node)
     body = []
     # return_node = None
 
     for node in func_node.body:
-        if is_return_variable(node, logger):
+        if is_return_variable(node, logger): #this is outside configure_pickles because we need to add a line, not modify
             return_var = node.value.id
             new_node = ast.parse(
                 f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
@@ -550,13 +573,37 @@ def configure_pickles(func_metadata, arg, arg_metadata, logger):
     func_node.body = body
     func_node.decorator_list = []
     return func_node
+
+
+# def is_check_vector(node, logger):
+#     return (
+#         isinstance(node, ast.If) and
+#         isinstance(node.test, ast.Compare) and
+#         isinstance(node.test.left, ast.Name) and
+#         node.test.left.id == 'vector_check' and
+#         len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.IsNot) and
+#         len(node.test.comparators) == 1 and isinstance(node.test.comparators[0], ast.Constant) and
+#         node.test.comparators[0].value is None
+#     )
+
+
+def is_check_vector(node, logger):
+    return(
+        isinstance(node, ast.Assign) and
+        len(node.targets) == 1 and
+        isinstance(node.targets[0], ast.Name) and
+        node.targets[0].id == 'vector_check' 
+    )
+
+
 class Configure_Pickles(NodeTransformer):
 
-    def __init__(self, arg, func_metadata, logger):
+    def __init__(self, arg, func_metadata,root_nodes, logger):
         self.logger = logger
         self.arg = arg
         self.func_metadata = func_metadata
         self.arg_metadata = func_metadata["args_metadata"][arg]
+        self.uses_root_node = self.arg in root_nodes
 
 
     def generic_visit(self, node):
@@ -584,16 +631,6 @@ class Configure_Pickles(NodeTransformer):
             if open_type.startswith("w"):
                 
                 if not isinstance(node.items[0].context_expr.args[0], ast.Name): # is not a variable
-                    # self.logger.info(f"func metadata: {self.func_metadata}")
-                    # if not node.items[0].context_expr.args[0].id == self.func_metadata["output_var_name"]:
-                    #     self.logger.warn(
-                    #         f"Function {self.func_metadata['name']} has a with open(variable), but the variable is not accounted for"
-                    #     )
-                    # else:
-                    #     #we dont' need to do anything, this output variable has already been configured
-                    #     pass
-                # else:
-                    # the arg to open is not a string, so we can assume it shoudl be the output file name
                     new = ast.parse(
                         f"open('{self.func_metadata['output_file_name']}', 'wb')"
                     ).body[0].value
@@ -628,12 +665,16 @@ class Configure_Pickles(NodeTransformer):
             )
         ):
             target = node.targets[0].id
-            # self.logger.info(f"Found toPandas call ")
-            # self.logger.info(ast.dump(node, indent=4))
-            return ast.copy_location ( 
-                ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)"),
-                node
-            )
+            if self.uses_root_node:
+                return ast.copy_location (
+                    ast.parse(f"{target} = {self.arg}"),
+                    node
+                )
+            else:
+                return ast.copy_location ( 
+                    ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)"),
+                    node
+                )
         
         
         elif ( is_load_pickle_from_dataset(node, self.logger) and 
@@ -654,6 +695,11 @@ class Configure_Pickles(NodeTransformer):
                 node
             )
 
+        elif is_check_vector(node, self.logger):
+            # this logic already updates the nidap dataset replacement above,
+            # it's easier to just set the value to True here 
+            node.value = ast.Constant(value=True)
+            
         return super().generic_visit(node)            
 
 def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
@@ -781,21 +827,35 @@ def configure_imports(funcs, logger):
             ast.fix_missing_locations(funcs[func]["function"])
     return funcs
 
-def is_code_workbook_utils_import(node, logger):
-    return(
-        isinstance(node, ast.ImportFrom) and
-        node.module == "code_workbook_utils.utils" 
-        # any(n in ["save_outputs", "parse_params","text_to_value"] for n in node.names)
-    )    
 
 class ImportTransformer(NodeTransformer):
     def __init__(self, logger):
         self.logger = logger
 
+    def is_code_workbook_utils_import(self, node, logger):
+        return(
+            isinstance(node, ast.ImportFrom) and
+            node.module == "code_workbook_utils.utils" 
+        )    
 
+    def is_pyspark_import(self, node, logger):
+        return(
+            isinstance(node, ast.ImportFrom) and
+            node.module == "pyspark" 
+        )    
+
+    def is_hpc_connector_import(self, node, logger):
+        return(
+            isinstance(node, ast.ImportFrom) and
+            node.module.startswith("hpc_connector_addons")
+        )
+    
     def generic_visit(self, node):
-        if is_code_workbook_utils_import(node, self.logger):
+        if self.is_code_workbook_utils_import(node, self.logger):
             node.module = "spac.templates.template_utils"
-        
+        if self.is_pyspark_import(node, self.logger):
+            return None
+        if self.is_hpc_connector_import(node, self.logger):
+            return None
         return super().generic_visit(node)
         

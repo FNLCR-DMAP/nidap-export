@@ -23,10 +23,13 @@ from graphlib import TopologicalSorter
 logger = logging.getLogger(__name__)
 
 
-def get_func_metadata(funcs):
+def get_func_metadata(funcs, repo_dir, func_dict):
     func_data = {}
     name_output_mapping = {}
     global_funcs = []
+    print("getting function metadata")
+    # pprint.pprint(funcs)
+
     for fun in funcs:
         if fun.decorator_list:
             transform_dec = None
@@ -37,8 +40,10 @@ def get_func_metadata(funcs):
                         transform_dec = dec
 
             if transform_dec is None:
-                logger.error(f"Function {fun.name} does not have the transform_pandas decorator")
+                logger.warning(f"Function {fun.name} does not have the transform_pandas decorator")
                 continue
+            # print("getting metadata for function", fun.name)
+            # print("decorator", ast.dump(transform_dec, indent=4))
 
             input_funcs = [kw for kw in transform_dec.keywords if kw.value.func.id == "Input"]
             input_var_rid_mapping = { kw.arg:kw.value.keywords[0].value.value for kw in input_funcs}
@@ -56,10 +61,10 @@ def get_func_metadata(funcs):
                 out_file_name_suffix = out_file_name.split(".")[-1]
                 out_file_name_prefix = out_file_name.split(".")[0]
                 out_file_name = f"{out_file_name_prefix}-{func_metadata['output_rid']}.{out_file_name_suffix}"
-                func_metadata["output_file_name"] = out_file_name
+                func_metadata["output_file_name"] = str(repo_dir/ "data" / out_file_name)
                 func_metadata["output_var_name"] = out_var_name
             else:
-                func_metadata["output_file_name"] = f"{fun.name}-{func_metadata['output_rid']}.pickle"
+                func_metadata["output_file_name"] = str(repo_dir / "data" / f"{fun.name}-{func_metadata['output_rid']}.pickle")
                 func_metadata["output_var_name"] = None
             
             func_metadata["args_metadata"] = get_func_args_metadata(fun, logger)
@@ -68,16 +73,24 @@ def get_func_metadata(funcs):
             name_output_mapping[transform_dec.args[0].keywords[0].value.value] = fun.name
             
         else:
-            #TODO handle global functions
             logger.info(f"Function {fun.name} added to global funcs")
             global_funcs.append(fun)
     
     return func_data, global_funcs
 
 def get_dependents(funcs):
-       
-    output_to_func = {funcs[func_name]["output_rid"]: func_name for func_name in funcs}
-    dependents = defaultdict(set)
+    output_to_func = {}
+    for func_name in funcs:
+        out_rid = funcs[func_name]["output_rid"]
+        if out_rid in output_to_func:
+            raise Exception(f"Duplicate output rid {out_rid} for functions {output_to_func[out_rid]} and {func_name}")
+        output_to_func[out_rid] = func_name
+   
+    #key: a function name
+    #value: set of function names that depend on the key
+    #i.e. key:parent, value: children
+    # dependents = defaultdict(set) 
+    dependents = {}
     root_nodes = []
 
     for func_name in funcs:
@@ -85,17 +98,20 @@ def get_dependents(funcs):
             for in_rid in funcs[func_name]["input_rids"]:
                 producer = output_to_func.get(in_rid)
                 if producer:
+                    if producer not in dependents:
+                        dependents[producer] = set()
                     dependents[producer].add(func_name)
                 else:
                     dependents[func_name] = set()
+        # else:
+            # root_nodes.append(func_name)
+    
 
     for has_child_func in dependents:
         has_parent = any([d for d in dependents if has_child_func in dependents[d]])
         if not has_parent:
             root_nodes.append(has_child_func)
-
-
-
+    
     return dependents, root_nodes
 
 def get_dag(funcs, dependents, logger):
@@ -131,19 +147,15 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
     
     cells = []
     
-    # func_list = []
-    # for func in sorted:
-    #     if func not in root_nodes:
-    #         func_data = func_dict_cleaned[func]
-    #         func_list.append(func_data)
+    cells.append(nbf.v4.new_code_cell(
+        "import sys\nsys.path.insert(0, '/data/BIDS-HPC/public/software/spac_dev/src')"
+    ))
 
-    cells.append(nbf.v4.new_markdown_cell("# Global Functions", metadata={"collapsed":True}))
-    for func in global_func_list:
-        code_text = ast.unparse(func)
-        cells.append(nbf.v4.new_code_cell(code_text))
+    
 
     cells.append(nbf.v4.new_markdown_cell("# Input Data", metadata={"collapsed":True}))
     opening_code_text = "import pandas as pd\n" 
+    #TODO document fact that you need to update user specificationto full path
     for node in root_nodes:
         if node in all_funcs and "function" in all_funcs[node]:
             opening_code_text += "\n"
@@ -152,71 +164,84 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
             opening_code_text += ast.unparse(all_funcs[node]["function"])
             opening_code_text += f"\n{node} = get_{node}()"
             opening_code_text += f"\n"
-            func_order.remove(node)
+            
+            if node in func_order:
+                func_order.remove(node)
         else:
             opening_code_text += f"\n{node} = /path/to/your/data\n"
     
     cells.append(nbf.v4.new_code_cell(opening_code_text, metadata={"collapsed":True}))
     cells.append(nbf.v4.new_markdown_cell("# Code", metadata={"collapsed":True}))
 
+    python_source_file = notebook_file_path.parent / "pipeline_functions.py"
 
-    for f in func_order:
-        func = all_funcs[f]
-        if "function" in func:
-            md_text = f"## {func['name']}\n{func['template']}"
-            #TODO add links to children in markdown 
-            cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
-            
-            code_text = ast.unparse(func["function"])
-            call_text = ast.unparse(func["func_call"])
-            cells.append(nbf.v4.new_code_cell(code_text))
-            cells.append(nbf.v4.new_code_cell(call_text))
+    with open(python_source_file, 'w') as file:
+        
+        for func in global_func_list:
+            code_text = ast.unparse(func)
+            file.write(f"{code_text}\n\n")
+
+        for f in func_order:
+            func = all_funcs[f]
+            if "function" in func:
+                md_text = f"**{func['name']}**\n\n{func['template']}"
+                #TODO add links to children in markdown 
+                cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
+                
+                code_text = ast.unparse(func["function"])
+                file.write(f"{code_text}\n\n")
+
+                call_text = f"from pipeline_functions import {func['name']}\n{ast.unparse(func['func_call'])}"
+                # cells.append(nbf.v4.new_code_cell(code_text))
+                cells.append(nbf.v4.new_code_cell(call_text))
 
     
     nb["cells"] = cells
     print(f"num cells: {len(cells)/2}")
     nbf.write(nb, notebook_file_path)
 
-def configure_function(func_dict):
+def configure_function(func_dict, root_nodes):
     
     for func_name in func_dict:
-        func_dict[func_name]["function"] = remove_foundry_artifacts(func_dict[func_name]["function"], logger) 
-        
-        for arg in func_dict[func_name]["args_metadata"]:
-            if "Load CSV Files" in func_dict[func_name]["template"]:            
-                func_dict[func_name]["function"] = configure_load_csv_files(
-                    func_dict[func_name]["function"], 
-                    arg,
-                    func_dict[func_name]["args_metadata"][arg],
-                    logger)
-                # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
-            # else:
-            func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
-            func_dict[func_name]["function"] = func
-            func_dict[func_name]["default_args"] = default_args
-
-            func_dict[func_name]["function"] = configure_pickles(
-                func_dict[func_name], 
-                arg, 
-                func_dict[func_name]["args_metadata"][arg], 
-                logger
-            )
+        if "function" in func_dict[func_name]:
+            func_dict[func_name]["function"] = remove_foundry_artifacts(func_dict[func_name]["function"], logger) 
             
-            if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
-                func_dict[func_name]["function"] = configure_func_calls(
+            for arg in func_dict[func_name]["args_metadata"]:
+                
+                if "Load CSV Files" in func_dict[func_name]["template"]:            
+                    func_dict[func_name]["function"] = configure_load_csv_files(
+                        func_dict[func_name]["function"], 
+                        arg,
+                        func_dict[func_name]["args_metadata"][arg],
+                        logger)
+                    # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
+                # else:
+                func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
+                func_dict[func_name]["function"] = func
+                func_dict[func_name]["default_args"] = default_args
+
+                func_dict[func_name]["function"] = configure_pickles(
                     func_dict[func_name], 
                     arg, 
-                    func_dict[func_name]["args_metadata"][arg], 
+                    root_nodes,
                     logger
                 )
-            
-            # func["function"] = configure_default_params(func, logger)
-            ast.fix_missing_locations(func_dict[func_name]["function"]) 
-            func_dict[func_name]["function"] = configure_non_function_output(
-                func_dict[func_name]["function"],  
-                func_dict[func_name]["args_metadata"],
-                logger
-            )
+                
+                if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
+                    func_dict[func_name]["function"] = configure_func_calls(
+                        func_dict[func_name], 
+                        arg, 
+                        func_dict[func_name]["args_metadata"][arg], 
+                        logger
+                    )
+                
+                # func["function"] = configure_default_params(func, logger)
+                ast.fix_missing_locations(func_dict[func_name]["function"]) 
+                func_dict[func_name]["function"] = configure_non_function_output(
+                    func_dict[func_name]["function"],  
+                    func_dict[func_name]["args_metadata"],
+                    logger
+                )
 
     return func_dict
 
@@ -246,42 +271,46 @@ def main(repo_dir):
     
     with open(python_file, 'r') as f:
         code = f.read()
-    #this is a syntax error apparantly. 
-    #it shows up between the decorators
+    #this is a syntax error. it shows up between the decorators
     code = code.replace("from pyspark.sql.types import *", "") 
     tree = ast.parse(code)
     
     all_code = [node for node in tree.body]
 
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
-    
-    template_mapping = get_template_version(code, named_funcs.keys(), logger)
-    
-    manual_datasets = { #assuming these are manually put in the data directory
+   
+    manual_datasets = {
         "mcmicro_output_annotation": {
             "name": "mcmicro_output_annotation",
-            # "input_file_path": repo_dir / "data" / "updated_mcmicro_output_with_detailed_and_broad_cell_types.csv",
             "input_rids": [],
             "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
             },
-        "rename_observations" : {
-            "name": "rename_observations",
-            "input_rids": [],
-            # "input_file_path": repo_dir / "data" / "rename_observations-transform_output.pickle",
-            "output_rid": "ri.foundry.main.dataset.628a0f9f-7dbd-4841-8f9b-84ec1562bcc3",
-        }
+        # "rename_observations" : {
+        #     "name": "rename_observations",
+        #     "input_rids": [],
+        #     # "input_file_path": repo_dir / "data" / "rename_observations-transform_output.pickle",
+        #     "output_rid": "ri.foundry.main.dataset.628a0f9f-7dbd-4841-8f9b-84ec1562bcc3",
+        # }
     }
 
-    func_list, global_funcs = get_func_metadata(named_funcs.values())
-    for func_name in func_list:
-        func_list[func_name]["template"] = template_mapping[func_name]
+    func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) #returns list of functions and metadata
+    with open(repo_dir / "func_dict.txt", 'w') as f:
+        pprint.pprint(func_dict, stream=f)
+
+    func_dict = {**func_dict, **manual_datasets}
+   
+    dependants, root_nodes = get_dependents(func_dict)
+    
+    
+    template_mapping = get_template_version(code, named_funcs.keys(), logger)
+    
+    for func_name in func_dict:
+        if func_name in template_mapping:
+            func_dict[func_name]["template"] = template_mapping[func_name]
 
     notebook_file = repo_dir / "pipeline.ipynb"
-    func_dict_cleaned = configure_function(func_list)
+    func_dict_cleaned = configure_function(func_dict, root_nodes) #edits the functions 
 
-    func_dict_cleaned = {**func_dict_cleaned, **manual_datasets}
-    
-    dependants, root_nodes = get_dependents(func_dict_cleaned)
     func_dict_cleaned = get_function_calls(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = configure_imports(func_dict_cleaned, logger)
@@ -291,8 +320,9 @@ def main(repo_dir):
     sorted = list(ts.static_order())
     sorted.reverse()
 
-    #TODO update code workbook utils.utils import text to value lines
-    
+    data_dir = repo_dir / "data"
+    data_dir.mkdir(exist_ok=True)
+
     dag_to_jupyter(sorted, func_dict_cleaned, root_nodes,  global_funcs, notebook_file)
 
 
