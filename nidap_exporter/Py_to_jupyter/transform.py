@@ -140,7 +140,45 @@ def get_dag(funcs, dependents, logger):
     #TODO prune zero depth nodes? e.g. sticky notes
     return dag
 
-def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook_file_path):
+def get_cell_markdown_text(func, dependants):
+    # print(f"getting markdown for {func}")
+
+    name = func["name"]
+    link = f"<a id='{name}'></a>\n"
+    header_text = f"**{name}**\n\n{func['template']}\n\n"
+    
+    parent_text = ""
+    dep_list = [d for d in dependants if func["name"] in dependants[d]]
+    
+    if dep_list:
+        # print(f"adding parents for {name}")
+        # print(dep_list)
+        parent_text = "Parents \n\n"
+        for d in dep_list:
+            parent_text += f" - [{d}](#{d})\n\n"
+        parent_text += "\n\n"
+
+    child_text = ""
+    if func["name"] in dependants:
+        print(f"adding children for {name}")
+        child_text = "Children\n\n" 
+        for child in dependants[func["name"]]:
+            child_text += f" - [{child}](#{child})\n\n"
+        child_text += "\n\n"
+    # print(f"\t{parent_text}")
+    # print(f"\t{child_text}")
+
+    return f"{link}{header_text}{parent_text}{child_text}"
+    
+    
+def dag_to_jupyter(
+        func_order, 
+        all_funcs, 
+        root_nodes, 
+        global_func_list, 
+        notebook_file_path, 
+        dependants
+    ):
 
     import nbformat as nbf
     nb = nbf.v4.new_notebook()
@@ -151,9 +189,7 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
         "import sys\nsys.path.insert(0, '/data/BIDS-HPC/public/software/spac_dev/src')"
     ))
 
-    
-
-    cells.append(nbf.v4.new_markdown_cell("# Input Data", metadata={"collapsed":True}))
+    cells.append(nbf.v4.new_markdown_cell("# Input Data"))
     opening_code_text = "import pandas as pd\n" 
     #TODO document fact that you need to update user specificationto full path
     for node in root_nodes:
@@ -170,30 +206,36 @@ def dag_to_jupyter(func_order, all_funcs, root_nodes, global_func_list, notebook
         else:
             opening_code_text += f"\n{node} = /path/to/your/data\n"
     
-    cells.append(nbf.v4.new_code_cell(opening_code_text, metadata={"collapsed":True}))
-    cells.append(nbf.v4.new_markdown_cell("# Code", metadata={"collapsed":True}))
+    cells.append(nbf.v4.new_code_cell(opening_code_text))
+    cells.append(nbf.v4.new_markdown_cell("# Code"))
 
     python_source_file = notebook_file_path.parent / "pipeline_functions.py"
-
+    
     with open(python_source_file, 'w') as file:
         
         for func in global_func_list:
             code_text = ast.unparse(func)
+            
             file.write(f"{code_text}\n\n")
 
         for f in func_order:
             func = all_funcs[f]
             if "function" in func:
-                md_text = f"**{func['name']}**\n\n{func['template']}"
-                #TODO add links to children in markdown 
-                cells.append(nbf.v4.new_markdown_cell(md_text, metadata={"collapsed":True}))
+                md_text = get_cell_markdown_text(func, dependants)
+                
+                cells.append(nbf.v4.new_markdown_cell(md_text))#, metadata={"collapsed":True}))
                 
                 code_text = ast.unparse(func["function"])
+                file.write(f"#{func['template']}\n")
                 file.write(f"{code_text}\n\n")
 
-                call_text = f"from pipeline_functions import {func['name']}\n{ast.unparse(func['func_call'])}"
+                import_text = f"from pipeline_functions import {func['name']}"
+                call_text = ast.unparse(func['func_call'])
+                indent = len(func['name']) + 1
+                call_text = call_text.replace(",", ",\n" + " " * indent)
+
                 # cells.append(nbf.v4.new_code_cell(code_text))
-                cells.append(nbf.v4.new_code_cell(call_text))
+                cells.append(nbf.v4.new_code_cell(f"{import_text}\n{call_text}"))
 
     
     nb["cells"] = cells
@@ -323,7 +365,7 @@ def main(repo_dir):
     data_dir = repo_dir / "data"
     data_dir.mkdir(exist_ok=True)
 
-    dag_to_jupyter(sorted, func_dict_cleaned, root_nodes,  global_funcs, notebook_file)
+    dag_to_jupyter(sorted, func_dict_cleaned, root_nodes,  global_funcs, notebook_file, dependants)
 
 
 if __name__ == "__main__":

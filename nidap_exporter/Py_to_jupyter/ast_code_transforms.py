@@ -458,12 +458,10 @@ def get_function_calls(func_dict, roots, logger):
         )
         
         # for arg_name in func_dict[func]["input_var_rid_mapping"]:
-        arg_order = [a.arg for a in func_dict[func]["function"].args.args ]
+        args = [a.arg for a in func_dict[func]["function"].args.args ]
         len_kwargs = len(func_dict[func]["function"].args.defaults)
         if len_kwargs > 0:
-            arg_order = arg_order[:-len_kwargs]
-        
-        
+            arg_order = args[:-len_kwargs]
 
         for arg_name in arg_order:
             # func_dict[func]["input_var_rid_mapping"]
@@ -472,8 +470,13 @@ def get_function_calls(func_dict, roots, logger):
 
             else:
                 node.value.args.append(ast.Name(id=arg_name))
-                
+        
+        # if func_dict[func]["name"] == "countplot_detailed_cell_type":   
+        #     print(ast.dump(func_dict[func]["function"], indent=2))
 
+        for arg_name, arg_value in zip(args[-len_kwargs:], func_dict[func]["function"].args.defaults):
+            new_keyword = ast.keyword(arg=arg_name, value=arg_value)
+            node.value.keywords.append(new_keyword)
         
         func_dict[func]["func_call"] = node
     
