@@ -464,17 +464,16 @@ def get_function_calls(func_dict, roots, logger):
             arg_order = args[:-len_kwargs]
 
         for arg_name in arg_order:
-            # func_dict[func]["input_var_rid_mapping"]
             if "output_file_name" in func_dict[arg_name] and not arg_name in roots:
                 node.value.args.append(ast.Constant(value=func_dict[arg_name]["output_file_name"]))
 
             else:
                 node.value.args.append(ast.Name(id=arg_name))
         
-        # if func_dict[func]["name"] == "countplot_detailed_cell_type":   
-        #     print(ast.dump(func_dict[func]["function"], indent=2))
+        
 
         for arg_name, arg_value in zip(args[-len_kwargs:], func_dict[func]["function"].args.defaults):
+            print(f"arg value {arg_value}\n\t {ast.unparse(arg_value)}")
             new_keyword = ast.keyword(arg=arg_name, value=arg_value)
             node.value.keywords.append(new_keyword)
         
@@ -862,3 +861,82 @@ class ImportTransformer(NodeTransformer):
             return None
         return super().generic_visit(node)
         
+
+def configure_hpc_call(funcs, logger):
+    for func in funcs:
+        if "function" in funcs[func]:
+            transformer = Configure_HPC_Call(funcs[func], logger)
+            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
+            ast.fix_missing_locations(funcs[func]["function"])
+    return funcs
+
+class Configure_HPC_Call(NodeTransformer):
+    def __init__(self, func_metadata, logger):
+        self.logger = logger
+        self.func_metadata = func_metadata
+        self.upstream_node = None
+        for arg_name in func_metadata["args_metadata"]:
+            if func_metadata["args_metadata"][arg_name]["arg_type"] == "hpc_launch":
+                self.upstream_node = arg_name
+
+    def is_if_run_on_hpc_block(self, node):
+        return (
+            isinstance(node, ast.If) and
+            isinstance(node.test, ast.Name) and
+            node.test.id == "run_on_hpc"
+        )
+    
+    def should_remove(self, node):
+        return (
+            isinstance(node, ast.Try) or (
+                isinstance(node, ast.If) and
+                isinstance(node.test, ast.Name) and
+                node.test.id == "batch_mode" 
+            ) or (
+
+                isinstance(node, ast.If) and
+                isinstance(node.test, ast.Subsctript) and
+                isinstance(node.test.value, ast.Name) and
+                node.test.value.id == "monitor_result" 
+            ) or self.is_input_file_name(node)
+        )
+    
+    def is_input_file_name(self, node):
+        return (
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and
+            node.targets[0].id.endswith("input_file_name") and
+            isinstance(node.value, ast.Constant)
+        )
+    
+    def is_upstream_node(self, node):
+        return (
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and
+            node.targets[0].id == "upstream_node" 
+        )
+    
+    def generic_visit(self, node):
+        
+        if self.is_if_run_on_hpc_block(node):
+            new_body = []
+            input_file_var = ""
+            for child in node.body:
+                if self.should_remove(child):
+                    continue
+                elif self.is_upstream_node(child):
+                    input_file_var = child.value.id
+                else: 
+                    new_body.append(child)
+            
+            
+            new_body.append(ast.parse(f'''input_file_name={input_file_var}''').body[0])
+            new_body.append(
+                
+            )
+            node.body = new_body
+                
+        
+        return super().generic_visit(node)

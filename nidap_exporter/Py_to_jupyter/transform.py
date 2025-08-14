@@ -1,23 +1,26 @@
-import sys
-import json
-from pathlib import Path
 import ast 
-from collections import defaultdict 
-import os
-from ast_code_transforms import configure_pickles
-from ast_code_transforms import get_output_file_info
-from ast_code_transforms import configure_default_args
-from ast_code_transforms import get_func_args_metadata
-from ast_code_transforms import configure_func_calls
-from ast_code_transforms import configure_non_function_output
-from ast_code_transforms import get_function_calls
-from ast_code_transforms import remove_foundry_artifacts
-from ast_code_transforms import configure_load_csv_files
-from ast_code_transforms import spark_to_pandas_root_nodes
-from ast_code_transforms import configure_imports
-import logging
-import pprint
+from ast_code_transforms import (
+    configure_default_args,
+    configure_func_calls,
+    configure_imports,
+    configure_load_csv_files,
+    configure_non_function_output,
+    configure_pickles,
+    get_func_args_metadata,
+    get_function_calls,
+    get_output_file_info,
+    remove_foundry_artifacts,
+    spark_to_pandas_root_nodes,
+)
 from graphlib import TopologicalSorter
+import inspect
+import logging
+from pathlib import Path
+from submit_hpc_job import submit_hpc_job
+import sys
+
+import pprint
+
 
 
 logger = logging.getLogger(__name__)
@@ -335,7 +338,11 @@ def main(repo_dir):
         # }
     }
 
-    func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) #returns list of functions and metadata
+    func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) 
+    
+    hpc_sumbit_function = ast.parse(inspect.getsource(submit_hpc_job)).body[0]
+    global_funcs.append(hpc_sumbit_function)
+    
     with open(repo_dir / "func_dict.txt", 'w') as f:
         pprint.pprint(func_dict, stream=f)
 
