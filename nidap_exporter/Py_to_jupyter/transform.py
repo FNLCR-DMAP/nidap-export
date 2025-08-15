@@ -16,6 +16,7 @@ from ast_code_transforms import (
 from graphlib import TopologicalSorter
 import inspect
 import logging
+import pandas as pd
 from pathlib import Path
 from submit_hpc_job import submit_hpc_job
 import sys
@@ -175,8 +176,7 @@ def get_cell_markdown_text(func, dependants):
     # print(f"\t{child_text}")
 
     return f"{link}{header_text}{parent_text}{child_text}"
-    
-    
+        
 def dag_to_jupyter(
         func_order, 
         all_funcs, 
@@ -264,8 +264,6 @@ def dag_to_jupyter(
     nbf.write(nb, notebook_file_path)
 
 
-
-
 def configure_function(func_dict, root_nodes):
     
     for func_name in func_dict:
@@ -330,32 +328,47 @@ def get_template_version(code, func_names, logger):
                 break
     return template_mapping
 
-def main(repo_dir):
+def get_manual_datasets(func_dict, logger):
+    manual_datasets = {}
+    for func_name in func_dict:
+        for arg in func_dict[func_name]["input_var_rid_mapping"]:
+            if arg not in func_dict and arg not in manual_datasets:
+                logger.info(f"MANUAL DATASET FOUND:\n\tFound an arg without an input function: {arg}, making this a manual dataset")
+                manual_datasets[arg] = {
+                    "name": arg,
+                    "input_rids": [],
+                    "output_rid": func_dict[func_name]["input_var_rid_mapping"][arg],
+                }
 
+    return manual_datasets
+
+def main(repo_dir):
     logging.basicConfig(level=logging.INFO)
 
     python_file = repo_dir / "pipeline.py"
-    
     with open(python_file, 'r') as f:
         code = f.read()
     #this is a syntax error. it shows up between the decorators
     code = code.replace("from pyspark.sql.types import *", "") 
     tree = ast.parse(code)
-    
     all_code = [node for node in tree.body]
-
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
    
-    manual_datasets = {
-        "mcmicro_output_annotation": {
-            "name": "mcmicro_output_annotation",
-            "input_rids": [],
-            "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
-            }
-    }
+    # make manual_datasets.csv if not exists
+    # manual_datasets_file = data_dir / "manual_datasets.csv"
+    # if not manual_datasets_file.exists():
+    #     manual_datasets_file.touch()
+    # manual_datasets = {
+    #     "mcmicro_output_annotation": {
+    #         "name": "mcmicro_output_annotation",
+    #         "input_rids": [],
+    #         "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
+    #         }
+    # }
 
     func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) 
-    
+    manual_datasets = get_manual_datasets(func_dict, logger)
+
     hpc_sumbit_function = ast.parse(inspect.getsource(submit_hpc_job)).body[0]
     global_funcs.append(hpc_sumbit_function)
     
