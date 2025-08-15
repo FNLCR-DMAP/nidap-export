@@ -1,5 +1,6 @@
 import ast 
 from ast_code_transforms import (
+    add_import,
     configure_default_args,
     configure_func_calls,
     configure_imports,
@@ -77,6 +78,8 @@ def get_func_metadata(funcs, repo_dir, func_dict):
             
         else:
             logger.info(f"Function {fun.name} added to global funcs")
+            fun.body.insert(0,ast.parse("import pandas as pd").body[0])
+            fun.body.insert(0,ast.parse("import numpy as np").body[0])
             global_funcs.append(fun)
     
     return func_data, global_funcs
@@ -163,7 +166,7 @@ def get_cell_markdown_text(func, dependants):
 
     child_text = ""
     if func["name"] in dependants:
-        print(f"adding children for {name}")
+
         child_text = "Children\n\n" 
         for child in dependants[func["name"]]:
             child_text += f" - [{child}](#{child})\n\n"
@@ -189,7 +192,10 @@ def dag_to_jupyter(
     cells = []
     
     cells.append(nbf.v4.new_code_cell(
-        "import sys\nsys.path.insert(0, '/data/BIDS-HPC/public/software/spac_dev/src')"
+        "import sys\n"\
+        "sys.path.insert(0, '/data/BIDS-HPC/public/software/spac_dev/src')\n"\
+        "import plotly.io as pio\n"\
+        "pio.renderers.default = 'notebook'"
     ))
 
     cells.append(nbf.v4.new_markdown_cell("# Input Data"))
@@ -233,9 +239,21 @@ def dag_to_jupyter(
                 file.write(f"{code_text}\n\n")
 
                 import_text = f"from pipeline_functions import {func['name']}"
-                call_text = ast.unparse(func['func_call'])
-                indent = len(func['name']) + 1
-                call_text = call_text.replace(",", ",\n" + " " * indent)
+                if True: #TODO certian templates
+                    import_text += f"\nimport plotly.io as pio\npio.renderers.default = 'notebook'"
+
+                # indent = len(func['name']) + 1
+                indent = 4
+                # call_text = ast.unparse(func['func_call'])
+                call_text = f"{func['name']}(\n"
+                num_args = len(func['func_call'].value.args)
+                num_kwargs = len(func['func_call'].value.keywords)
+                for arg in func['func_call'].value.args:
+                    call_text +=f"{' ' * indent}{ast.unparse(arg)},\n"
+                for kwarg in func['func_call'].value.keywords:
+                    call_text +=f"{' ' * indent}{kwarg.arg}={ast.unparse(kwarg.value)},\n"
+
+                call_text += ")"                
 
                 # cells.append(nbf.v4.new_code_cell(code_text))
                 cells.append(nbf.v4.new_code_cell(f"{import_text}\n{call_text}"))
@@ -245,12 +263,15 @@ def dag_to_jupyter(
     print(f"num cells: {len(cells)/2}")
     nbf.write(nb, notebook_file_path)
 
+
+
+
 def configure_function(func_dict, root_nodes):
     
     for func_name in func_dict:
         if "function" in func_dict[func_name]:
             func_dict[func_name]["function"] = remove_foundry_artifacts(func_dict[func_name]["function"], logger) 
-            
+            func_dict[func_name]["function"] = add_import(func_dict[func_name]["function"])
             for arg in func_dict[func_name]["args_metadata"]:
                 
                 if "Load CSV Files" in func_dict[func_name]["template"]:            
@@ -274,9 +295,10 @@ def configure_function(func_dict, root_nodes):
                 
                 if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
                     func_dict[func_name]["function"] = configure_func_calls(
-                        func_dict[func_name], 
-                        arg, 
-                        func_dict[func_name]["args_metadata"][arg], 
+                        func_dict,
+                        func_name,
+                        arg,
+                        root_nodes,
                         logger
                     )
                 
@@ -329,13 +351,7 @@ def main(repo_dir):
             "name": "mcmicro_output_annotation",
             "input_rids": [],
             "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
-            },
-        # "rename_observations" : {
-        #     "name": "rename_observations",
-        #     "input_rids": [],
-        #     # "input_file_path": repo_dir / "data" / "rename_observations-transform_output.pickle",
-        #     "output_rid": "ri.foundry.main.dataset.628a0f9f-7dbd-4841-8f9b-84ec1562bcc3",
-        # }
+            }
     }
 
     func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) 
@@ -343,7 +359,7 @@ def main(repo_dir):
     hpc_sumbit_function = ast.parse(inspect.getsource(submit_hpc_job)).body[0]
     global_funcs.append(hpc_sumbit_function)
     
-    with open(repo_dir / "func_dict.txt", 'w') as f:
+    with open(repo_dir / "function_metadata", 'w') as f:
         pprint.pprint(func_dict, stream=f)
 
     func_dict = {**func_dict, **manual_datasets}
@@ -372,6 +388,7 @@ def main(repo_dir):
     data_dir = repo_dir / "data"
     data_dir.mkdir(exist_ok=True)
 
+    #TODO unnamed_54 (Spatial plot) not working
     dag_to_jupyter(sorted, func_dict_cleaned, root_nodes,  global_funcs, notebook_file, dependants)
 
 

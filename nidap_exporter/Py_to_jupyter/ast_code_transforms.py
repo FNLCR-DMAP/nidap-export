@@ -345,42 +345,52 @@ def get_import_end_index (func_node, logger):
             return i
     return 0 
 
-def configure_func_calls(func_metadata, arg, arg_metadata, logger):
-    #$1
+# def configure_func_calls(func_metadata, arg, arg_metadata, root_nodes, logger):
+def configure_func_calls(func_dict, func_name, arg, root_nodes, logger):
+
+    func_metadata = func_dict[func_name]
+    arg_metadata = func_metadata["args_metadata"][arg]
     func_node = func_metadata["function"]
     
-    if "func_call_var" in arg_metadata:
-        func_call_var = arg_metadata["func_call_var"]
-    else:
-        func_call_var = arg
+    if arg not in root_nodes:
+        
+        if "func_call_var" in arg_metadata:
+            func_call_var = arg_metadata["func_call_var"]
+        else:
+            func_call_var = arg
+        
+        insert_index = get_import_end_index(func_node, logger)
+        
+        if func_dict[arg]["output_file_name"].endswith(".pickle"):
+            code = f"with open({arg}, 'rb') as f:\n\t{func_call_var} = pickle.load(f)" 
+        elif func_dict[arg]["output_file_name"].endswith(".csv"):
+            code = f"with open({arg}, 'r') as f:\n\t{func_call_var} = pd.read_csv(f)" 
 
-
-    code = f"with open({arg}, 'rb') as f:\n\t{func_call_var} = pickle.load(f)" 
-    insert_index = get_import_end_index(func_node, logger)
-    func_node.body.insert(insert_index, ast.parse(code).body[0])
-    
-    if "func_call_var" in arg_metadata:
-        new_body = []
-        # print(f"looking to remove {arg_metadata['func_call_var']}")
-        for node in func_node.body:
-            # print(ast.unparse(node))
-            if ( isinstance(node, ast.Assign) and
-                 len(node.targets) == 1 and
-                 isinstance(node.value, ast.Name) and
-                 node.targets[0].id == arg_metadata["func_call_var"]
-            ):
-                # print(f"removing {ast.unparse(node)}")
-                continue
-            else:
-                new_body.append(node)
-        func_node.body = new_body
+        func_node.body.insert(insert_index, ast.parse(code).body[0])
+        
+        if "func_call_var" in arg_metadata:
+            new_body = []
+            # print(f"looking to remove {arg_metadata['func_call_var']}")
+            for node in func_node.body:
+                # print(ast.unparse(node))
+                if ( isinstance(node, ast.Assign) and
+                    len(node.targets) == 1 and
+                    isinstance(node.value, ast.Name) and
+                    node.targets[0].id == arg_metadata["func_call_var"]
+                ):
+                    continue
+                else:
+                    new_body.append(node)
+            func_node.body = new_body
     
     return func_node
 
 def configure_default_args(func_node, logger):
     default_args = {}
     func_body = []
-
+    #TODO pin_colored_interactive_spatial_plot among others not working 
+    # has lines stratify_by = text_to_value('None', param_name='Stratify By')
+    #.          defined_color_map = text_to_value('_spac_colors', param_name='Define Label Color Mapping')
     default_param_end_index = 0
     import_end_index = get_import_end_index(func_node, logger)
 
@@ -460,10 +470,14 @@ def get_function_calls(func_dict, roots, logger):
         # for arg_name in func_dict[func]["input_var_rid_mapping"]:
         args = [a.arg for a in func_dict[func]["function"].args.args ]
         len_kwargs = len(func_dict[func]["function"].args.defaults)
+        
         if len_kwargs > 0:
             arg_order = args[:-len_kwargs]
+        else:
+            arg_order = args
 
         for arg_name in arg_order:
+
             if "output_file_name" in func_dict[arg_name] and not arg_name in roots:
                 node.value.args.append(ast.Constant(value=func_dict[arg_name]["output_file_name"]))
 
@@ -473,7 +487,9 @@ def get_function_calls(func_dict, roots, logger):
         
 
         for arg_name, arg_value in zip(args[-len_kwargs:], func_dict[func]["function"].args.defaults):
-            print(f"arg value {arg_value}\n\t {ast.unparse(arg_value)}")
+            #TODO remove this when run_on_HPC is working
+            if arg_name == "run_on_HPC":
+                arg_value = ast.Constant(value=False)
             new_keyword = ast.keyword(arg=arg_name, value=arg_value)
             node.value.keywords.append(new_keyword)
         
@@ -551,7 +567,9 @@ class Remove_Foundry_Artifacts(NodeTransformer):
             node = node.body[0]
 
         return super().generic_visit(node)
+
 def configure_pickles(func_metadata, arg, root_nodes, logger):
+    
     
     func_node = func_metadata["function"]
 
@@ -563,6 +581,7 @@ def configure_pickles(func_metadata, arg, root_nodes, logger):
 
     for node in func_node.body:
         if is_return_variable(node, logger): #this is outside configure_pickles because we need to add a line, not modify
+                
             return_var = node.value.id
             new_node = ast.parse(
                 f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
@@ -574,6 +593,9 @@ def configure_pickles(func_metadata, arg, root_nodes, logger):
             body.append(node)
     func_node.body = body
     func_node.decorator_list = []
+
+
+
     return func_node
 
 
@@ -608,26 +630,39 @@ class Configure_Pickles(NodeTransformer):
         self.uses_root_node = self.arg in root_nodes
 
 
-    def generic_visit(self, node):
-        # self.logger.info("visit node")
-        # self.logger.info(ast.dump(node, indent=4))
-        
-        if is_output_file_name(node, self.logger):
-            node.value.value = self.func_metadata["output_file_name"]
+    def is_output_format_string(self, node):
+        if ( isinstance(node, ast.Assign) and
+             isinstance(node.value, ast.JoinedStr)
+        ):
+            fmt_values = [v for v in node.value.values if isinstance(v, ast.FormattedValue)]
+            for v in fmt_values:
+                for n in ast.walk(v):
+                    if isinstance(n, ast.Name) and n.id == "Transforms":
+                        return True
 
+        return False
+
+    def generic_visit(self, node):
+        # if self.func_metadata["name"] == "manual_phenotyping":
+            # self.logger.info(f"visit {ast.unparse(node)}")
+
+        if is_output_file_name(node, self.logger):
+    
+            node.value.value = self.func_metadata["output_file_name"]
+        elif self.is_output_format_string(node):
+            node.value = ast.Constant(f"{node.value.values[0].value}{self.func_metadata['name']}.png")
         elif is_foundry_fs_with_open(node, self.logger) and len(node.body) == 1:
+            
             #with {}.open(..., 'w'/'wb') as f
             #    pickle.dump() OR df.to_csv(f)
             # #with {}.open(..., 'r','rb') as f
             #    pickle.load 
-            
-
             # if the pickle op is a dump, OR to_csv we need to check the output file path#
             #        #if the argument to open is a variable, we need to check the #
             # if the pickle op is a load, we need to configure the arg #
             #     this includes updating the open() arg to the input variable#
 
-            # open_type = node.items[0].context_expr.func.args[1].value.
+            
             open_type = node.items[0].context_expr.args[1].value
 
             if open_type.startswith("w"):
@@ -667,6 +702,7 @@ class Configure_Pickles(NodeTransformer):
             )
         ):
             target = node.targets[0].id
+            
             if self.uses_root_node:
                 return ast.copy_location (
                     ast.parse(f"{target} = {self.arg}"),
@@ -682,6 +718,7 @@ class Configure_Pickles(NodeTransformer):
         elif ( is_load_pickle_from_dataset(node, self.logger) and 
                node.value.args[0].id == self.arg
         ):
+            
             var_name = node.targets[0].id
             code = f"with open({self.arg}, 'rb') as f:\n\t{var_name} = pickle.load(f)"
             return ast.copy_location(
@@ -690,6 +727,7 @@ class Configure_Pickles(NodeTransformer):
             )
     
         elif is_save_pickle_to_output(node, self.logger):
+            
             code = f"with open('{self.func_metadata['output_file_name']}', 'wb') as f:"\
                    f"\n\tpickle.dump({node.value.args[1].id}, f)"
             return ast.copy_location(
@@ -698,11 +736,15 @@ class Configure_Pickles(NodeTransformer):
             )
 
         elif is_check_vector(node, self.logger):
+            
             # this logic already updates the nidap dataset replacement above,
             # it's easier to just set the value to True here 
             node.value = ast.Constant(value=True)
             
-        return super().generic_visit(node)            
+        
+            
+
+        return super().generic_visit(node)
 
 def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
 
@@ -854,7 +896,14 @@ class ImportTransformer(NodeTransformer):
     
     def generic_visit(self, node):
         if self.is_code_workbook_utils_import(node, self.logger):
+            imports = [a.name for a in node.names]
+            exclude = ["save_pickle_to_output","load_pickle_from_dataset"]
+            for e in exclude:
+                if e in imports:
+                    imports.remove(e)
+
             node.module = "spac.templates.template_utils"
+            node.names = [ast.alias(name=i) for i in imports]
         if self.is_pyspark_import(node, self.logger):
             return None
         if self.is_hpc_connector_import(node, self.logger):
@@ -871,6 +920,7 @@ def configure_hpc_call(funcs, logger):
     return funcs
 
 class Configure_HPC_Call(NodeTransformer):
+
     def __init__(self, func_metadata, logger):
         self.logger = logger
         self.func_metadata = func_metadata
@@ -940,3 +990,38 @@ class Configure_HPC_Call(NodeTransformer):
                 
         
         return super().generic_visit(node)
+    
+
+def has_import_pickle(func_node):
+
+    for node in ast.walk(func_node):
+        # Match: import pickle
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == 'pickle':
+                    return True
+        # Match: from pickle import ...
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == 'pickle':
+                return True
+    return False
+
+def has_import_pandas(func_node):
+
+    for node in ast.walk(func_node):
+        
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == 'pandas':
+                    return True
+        
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == 'pandas':
+                return True
+    return False
+def add_import(node):
+    if not has_import_pickle(node):
+        node.body.insert(0, ast.parse("import pickle").body[0])
+    if not has_import_pandas(node):
+        node.body.insert(0, ast.parse("import pandas as pd").body[0])
+    return node
