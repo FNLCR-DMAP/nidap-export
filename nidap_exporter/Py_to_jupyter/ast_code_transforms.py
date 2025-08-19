@@ -42,14 +42,6 @@ def is_foundry_fs_operation(node, logger):
         return True
     return False
 
-# def is_output_file(node, logger):
-#     #matches with *_output_file = 'nearest_neighbor_plots.csv'
-#     return ( 
-#         isinstance(node, ast.Assign) and
-#         len(node.targets) == 1 and
-#         isinstance(node.targets[0], ast.Name) and
-#         node.targets[0].id.endswith("output_file")
-#     )
     
 def is_foundry_fs_with_open(node, logger):
     #matches with output_fs.open('{outfile name}', 'wb') as f:
@@ -63,28 +55,7 @@ def is_foundry_fs_with_open(node, logger):
         node.items[0].context_expr.func.attr == "open" 
     )
 
-# def is_pickle_dump(node, logger):
-#     return(
-#         isinstance(node, ast.Assign) and
-#         isinstance(node.value, ast.Call) and
-#         isinstance(node.value.func, ast.Attribute) and
-#         isinstance(node.value.func.value, ast.Name) and
-#         node.value.func.value.id == "pickle" and
-#         node.value.func.attr == "dump"
-#     )
 
-
-# def is_pickle_load(node, logger):
-#     #with open('file.pickle', 'rb') as f:
-#     #    data = pickle.load(f)
-#      return(
-#         isinstance(node, ast.Assign) and
-#         isinstance(node.value, ast.Call) and
-#         isinstance(node.value.func, ast.Attribute) and
-#         isinstance(node.value.func.value, ast.Name) and
-#         node.value.func.value.id == "pickle" and
-#         node.value.func.attr == "load"
-#     )
 
 def get_output_file_info(func_node, logger):
     output_file_name = None
@@ -96,22 +67,7 @@ def get_output_file_info(func_node, logger):
     
     return output_file_name, output_var_name
             
-def is_hpc_launch(node, has_upstream_node_assign, func_args, logger):
-    if has_upstream_node_assign:
-        kw_target = ["upstream_node"]
-    else:
-        kw_target = func_args
-    
-    return (
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.value, ast.Call) and
-            node.value.func.id == "hpc_direct_launch" and
-            any([
-                k.arg == "upstream_node" and k.value in kw_target 
-                for k in node.value.keywords
-            ])
-    )
+
 
 def get_upstream_assign(func_node, args, logger):
     
@@ -145,13 +101,13 @@ def get_is_variable_mapping(func_node, arg_list, logger):
             isinstance(node, ast.Assign) and
             len(node.targets) == 1 and
             isinstance(node.targets[0], ast.Name) and
-            (
-                node.targets[0].id == "df" or 
-                node.targets[0].id == "dataframe" or
-                node.targets[0].id == "input_dataset" or
-                node.targets[0].id == "phenotypes" or
-                node.targets[0].id == "NIDAP_dataset" 
-            ) and
+            # (
+            #     node.targets[0].id == "df" or 
+            #     node.targets[0].id == "dataframe" or
+            #     node.targets[0].id == "input_dataset" or
+            #     node.targets[0].id == "phenotypes" or
+            #     node.targets[0].id == "NIDAP_dataset" 
+            # ) and
             isinstance(node.value, ast.Name) and
             node.value.id in arg_list
         ):
@@ -191,20 +147,19 @@ def is_subfunction_call(node, logger):
         isinstance(node.value, ast.Call)
     )      
 
-def handle_var(node,high_level_func_args, var_mapping, logger):
+def check_sub_function_vals(node,high_level_func_args, var_mapping, logger):
     #df = function_arg \n summarize_dataframe(df)
-    func_args = get_fun_call_args(node, logger)
+    sub_func_args = get_fun_call_args(node, logger)
     
     metadata = {}
-
     
-    for arg in func_args: #arg is straight up used by function call
+    for arg in sub_func_args: #arg is straight up used by function call
          if arg in high_level_func_args:
             metadata[arg] = {
                 "arg_type": "sub_func_call"
             }
     
-    for arg in func_args:
+    for arg in sub_func_args:
         if arg in var_mapping.keys():
             metadata[var_mapping[arg]] = {  
                 "arg_type": "sub_func_call",
@@ -247,7 +202,6 @@ def is_arg_assign(node, arg, logger):
         isinstance(node.value, ast.Name) and
         node.value.id == arg        
     )
-
 def extract_positional_args(func_node):
     args = func_node.args
     positional_args = []
@@ -271,13 +225,16 @@ def extract_positional_args(func_node):
 
     return positional_args
 
-
 def get_func_args_metadata(func_node, logger):
+    
+    
+    
     func_args = extract_positional_args(func_node)
+    
     func_args_metadata = {}
     output_arg_metadata = {}
     upstream_node = get_upstream_assign(func_node, func_args, logger)
-    var_mapping = †(func_node, func_args, logger)
+    var_mapping = get_is_variable_mapping(func_node, func_args, logger)
     filesystem_assign = get_filesystem_assign(func_node, func_args, logger)
     
     for node in ast.walk(func_node):
@@ -292,16 +249,20 @@ def get_func_args_metadata(func_node, logger):
                 }
                 func_args.remove(var)
             elif( var in filesystem_assign.keys() ):
+                
+                
+                
                 #matches with {some_var} = {ARG}.filesystem()
                 # ... wtih {some_var}.open
                 func_args_metadata[filesystem_assign[var]] = {
                     "arg_type": "foundry_fs_pickle_load",
                     "fs_var": var
                 }
-                func_args.remove(filesystem_assign[var])
+                if filesystem_assign[var] in func_args:
+                    func_args.remove(filesystem_assign[var])
         
         elif (is_to_pandas(node, logger) ):
-
+            
             # matches blah = input.toPandas()
             if node.value.func.value.id in func_args:
                 func_args_metadata[node.value.func.value.id] = {
@@ -317,31 +278,37 @@ def get_func_args_metadata(func_node, logger):
                 func_args.remove(var_mapping[node.value.func.value.id])
       
         elif is_load_pickle_from_dataset(node, logger): #load_pickle_from_dataset
+            
             func_args_metadata[node.value.args[0].id] = {
                 "arg_type": "load_pickle_from_dataset"
             }
             func_args.remove(node.value.args[0].id)
-        elif is_subfunction_call(node, logger):
-            metadata = handle_var(node, func_args, var_mapping, logger) 
-            
-            for key in metadata:
-                func_args_metadata[key] = metadata[key]
-                func_args.remove(key)
-        elif (
-            is_get_filesystem(node, logger) and
-            node.value.func.value.id not in func_args and 
-            node.value.func.value.id not in var_mapping
-        ):
-            #is output_fs = output.filesystem
-            func_args_metadata[node.value.func.value.id] = {
-                "arg_type": "output_filesystem"
-            }
         elif any(is_arg_assign(node, a, logger) for a in func_args):
             #matches with var = ARG
             func_args_metadata[node.value.id] = {
                 "arg_type": "arg_assign"
             }
             func_args.remove(node.value.id)
+        # elif is_subfunction_call(node, logger):
+        #     metadata = check_sub_function_vals(node, func_args, var_mapping, logger) 
+
+        #     for key in metadata:
+        #         
+        #         func_args_metadata[key] = metadata[key]
+        #         func_args.remove(key)
+        elif (
+            is_get_filesystem(node, logger) and
+            node.value.func.value.id not in func_args and 
+            node.value.func.value.id not in var_mapping
+        ):
+            
+            
+            #is output_fs = output.filesystem
+            func_args_metadata[node.value.func.value.id] = {
+                "arg_type": "output_filesystem"
+            }
+            # func_args.remove(node.value.func.value.id)
+
 
         elif(False):
             if (is_hpc_launch(node, upstream_node, func_args, logger)): 
@@ -360,7 +327,8 @@ def get_func_args_metadata(func_node, logger):
                     func_args.remove(arg_name)
     
     if len(func_args) > 0:
-        raise Exception(f"not all args accounted for {func_node.name}\nhave {func_args} unaccounted for")
+        # raise Exception(f"not all args accounted for {func_node.name}\nhave {func_args} unaccounted for")
+        logger.warn(f"Function {func_node.name} not all args accounted for. \n\thave {func_args} unaccounted for")
     
     return func_args_metadata
 
@@ -394,15 +362,17 @@ def configure_func_calls(func_dict, func_name, arg, root_nodes, logger):
         if func_dict[arg]["output_file_name"].endswith(".pickle"):
             code = f"with open({arg}, 'rb') as f:\n\t{func_call_var} = pickle.load(f)" 
         elif func_dict[arg]["output_file_name"].endswith(".csv"):
-            code = f"with open({arg}, 'r') as f:\n\t{func_call_var} = pd.read_csv(f)" 
+            code = f"with open({arg}, 'r') as f:\n\t{func_call_var} = pd.read_csv(f)"
+        else:
+            raise Exception(f"unknown input file type, input file: {func_dict[arg]["output_file_name"]}") 
 
         func_node.body.insert(insert_index, ast.parse(code).body[0])
         
         if "func_call_var" in arg_metadata:
             new_body = []
-            # print(f"looking to remove {arg_metadata['func_call_var']}")
+            # 
             for node in func_node.body:
-                # print(ast.unparse(node))
+                # 
                 if ( isinstance(node, ast.Assign) and
                     len(node.targets) == 1 and
                     isinstance(node.value, ast.Name) and
@@ -648,7 +618,7 @@ class Configure_Pickles(NodeTransformer):
 
         return False
     
-    def replace_with_pickle_load(self, node, logger):
+    def should_replace_with_pickle_load(self, node, logger):
         return (
             (
                 is_to_pandas(node, self.logger) and
@@ -688,24 +658,33 @@ class Configure_Pickles(NodeTransformer):
             #     this includes updating the open() arg to the input variable#
 
             
-            open_type = node.items[0].context_expr.args[1].value
+            open_args = node.items[0].context_expr.args
+            if len(open_args) == 1:
+                open_type = "rb"
+                self.logger.warn(
+                    f"No open type found\n\tfunction {self.func_metadata["name"]}"
+                    f"is opening arg {self.arg} with no type, assigning 'rb'"
+                )
+            else:
+                open_type = open_args[1].value
 
             if open_type.startswith("w"):
-                
+                open_type = "wb"
                 if not isinstance(node.items[0].context_expr.args[0], ast.Name): # is not a variable
                     new = ast.parse(
-                        f"open('{self.func_metadata['output_file_name']}', 'wb')"
+                        f"open('{self.func_metadata['output_file_name']}', '{open_type}')"
                     ).body[0].value
                     node.items[0].context_expr = new
                 else:
-                    file_name, write_type = node.items[0].context_expr.args
+                    file_name = node.items[0].context_expr.args[0]
                     new = ast.parse(
-                        f"open({file_name.id}, '{write_type.value}')"
+                        f"open({file_name.id}, '{open_type}')"
                     ).body[0].value
                     node.items[0].context_expr = new
 
         
             elif open_type.startswith("r"):
+                open_type = "rb"
                 #reading in a dataset
                 if (
                     "fs_var" in self.arg_metadata and  
@@ -713,13 +692,12 @@ class Configure_Pickles(NodeTransformer):
                     node.items[0].context_expr.func.value.id == self.arg_metadata["fs_var"] 
                 ):
                     node.items[0].context_expr = ast.parse(
-                        f"open({self.arg}, 'rb')"
+                        f"open({self.arg}, {open_type})"
                     ).body[0].value
                
-            else:
-                self.logger.warn(f"Function has with, open: {self.func_metadata['name']}")
+
         
-        elif self.replace_with_pickle_load( node, self.logger):
+        elif self.should_replace_with_pickle_load( node, self.logger):
             target = node.targets[0].id
             
             if self.uses_root_node:
@@ -756,9 +734,9 @@ class Configure_Pickles(NodeTransformer):
 def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
 
     transformer = Configure_Load_CSV_Files(arg, func_arg_metadata, logger)
-    # print(f"configuring node: {ast.unparse(node)}")
+    # 
     node = transformer.visit(node)
-    # print(f"configured node: {ast.unparse(node)}")
+    # 
     ast.fix_missing_locations(node)
     
     return node
@@ -1056,19 +1034,21 @@ class Configure_Default_Vals(ast.NodeTransformer):
         self.logger = logger
         self.func_metadata = func_metadata
 
-    def is_with_spark(node):
+    def is_with_spark(self, node):
         return (
             isinstance(node, ast.Assign) and
             len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and
             node.targets[0].id == "with_spark" and
             isinstance(node.value, ast.Constant) and
             node.value.value == True
         )
 
-    def is_run_on_HPC(node):
+    def is_run_on_HPC(self, node):
         return (
             isinstance(node, ast.Assign) and
             len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and 
             node.targets[0].id == "run_on_HPC" and
             isinstance(node.value, ast.Constant) and
             node.value.value == True
@@ -1084,3 +1064,21 @@ class Configure_Default_Vals(ast.NodeTransformer):
             node.value = ast.Constant(value=False)
 
         return self.generic_visit(node)
+    
+
+def is_hpc_launch(node, has_upstream_node_assign, func_args, logger):
+    if has_upstream_node_assign:
+        kw_target = ["upstream_node"]
+    else:
+        kw_target = func_args
+    
+    return (
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            isinstance(node.value, ast.Call) and
+            node.value.func.id == "hpc_direct_launch" and
+            any([
+                k.arg == "upstream_node" and k.value in kw_target 
+                for k in node.value.keywords
+            ])
+    )

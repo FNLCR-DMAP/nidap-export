@@ -289,14 +289,14 @@ def configure_function(func_dict, root_nodes):
                     logger
                 )
                 
-                if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
-                    func_dict[func_name]["function"] = configure_func_calls(
-                        func_dict,
-                        func_name,
-                        arg,
-                        root_nodes,
-                        logger
-                    )
+                # if func_dict[func_name]["args_metadata"][arg]["arg_type"] == "sub_func_call":
+                #     func_dict[func_name]["function"] = configure_func_calls(
+                #         func_dict,
+                #         func_name,
+                #         arg,
+                #         root_nodes,
+                #         logger
+                #     )
                 
                 # func["function"] = configure_default_params(func, logger)
                 ast.fix_missing_locations(func_dict[func_name]["function"]) 
