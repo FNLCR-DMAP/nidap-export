@@ -12,6 +12,7 @@ from ast_code_transforms import (
     get_output_file_info,
     remove_foundry_artifacts,
     spark_to_pandas_root_nodes,
+    configure_default_vals
 )
 from graphlib import TopologicalSorter
 import inspect
@@ -47,8 +48,6 @@ def get_func_metadata(funcs, repo_dir, func_dict):
             if transform_dec is None:
                 logger.warning(f"Function {fun.name} does not have the transform_pandas decorator")
                 continue
-            # print("getting metadata for function", fun.name)
-            # print("decorator", ast.dump(transform_dec, indent=4))
 
             input_funcs = [kw for kw in transform_dec.keywords if kw.value.func.id == "Input"]
             input_var_rid_mapping = { kw.arg:kw.value.keywords[0].value.value for kw in input_funcs}
@@ -278,11 +277,10 @@ def configure_function(func_dict, root_nodes):
                         arg,
                         func_dict[func_name]["args_metadata"][arg],
                         logger)
-                    # logger.info(f"Removing foundry isms from {func['name']}, {func['function']}")
-                # else:
-                func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
-                func_dict[func_name]["function"] = func
-                func_dict[func_name]["default_args"] = default_args
+
+                # func, default_args = configure_default_args(func_dict[func_name]["function"], logger)
+                # func_dict[func_name]["function"] = func
+                # func_dict[func_name]["default_args"] = default_args
 
                 func_dict[func_name]["function"] = configure_pickles(
                     func_dict[func_name], 
@@ -350,22 +348,14 @@ def main(repo_dir):
         code = f.read()
     #this is a syntax error. it shows up between the decorators
     code = code.replace("from pyspark.sql.types import *", "") 
+    code = code.replace("from pyspark.sql import functions as F", "")
+    code = code.replace("from pyspark.sql import Row", "")
+    code = code.replace("import pandas as pd", "")
+
     tree = ast.parse(code)
     all_code = [node for node in tree.body]
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
    
-    # make manual_datasets.csv if not exists
-    # manual_datasets_file = data_dir / "manual_datasets.csv"
-    # if not manual_datasets_file.exists():
-    #     manual_datasets_file.touch()
-    # manual_datasets = {
-    #     "mcmicro_output_annotation": {
-    #         "name": "mcmicro_output_annotation",
-    #         "input_rids": [],
-    #         "output_rid": "ri.foundry.main.dataset.162f602c-6d49-4f8c-a5ca-e7a91249388f",
-    #         }
-    # }
-
     func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) 
     manual_datasets = get_manual_datasets(func_dict, logger)
 
@@ -379,6 +369,10 @@ def main(repo_dir):
    
     dependants, root_nodes = get_dependents(func_dict)
     
+    #TODO call script from /data/NIDAP-JOBS/hpc-pipelines
+    # https://github.com/FNLCR-DMAP/hpc-pipelines/blob/22c8aae3a91e10ee5c0fafb63ad52dc202f7db38/hpc_pipelines/hpc_code_workbook_connector/src/WorkbookNodeParameter/template_param_get.sh#L106
+
+    #TODO look for if not with_spark: and always make false
     
     template_mapping = get_template_version(code, named_funcs.keys(), logger)
     
@@ -388,10 +382,10 @@ def main(repo_dir):
 
     notebook_file = repo_dir / "pipeline.ipynb"
     func_dict_cleaned = configure_function(func_dict, root_nodes) #edits the functions 
-
     func_dict_cleaned = get_function_calls(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = configure_imports(func_dict_cleaned, logger)
+    func_dict_cleaned = configure_default_vals(func_dict_cleaned, logger)
     
     ts = TopologicalSorter(dependants)
 

@@ -63,36 +63,28 @@ def is_foundry_fs_with_open(node, logger):
         node.items[0].context_expr.func.attr == "open" 
     )
 
-def is_pickle_dump(node, logger):
-    return(
-        isinstance(node, ast.Assign) and
-        isinstance(node.value, ast.Call) and
-        isinstance(node.value.func, ast.Attribute) and
-        isinstance(node.value.func.value, ast.Name) and
-        node.value.func.value.id == "pickle" and
-        node.value.func.attr == "dump"
-    )
-    # for node in body_node.walk():
-    #     if (
-    #         isinstance(node, ast.Expr) and
-    #         isinstance(node.value, ast.Call) and
-    #         node.value.func.id == "pickle" and
-    #         node.value.func.attr == "dump" 
-    #     ):
-    #         return True
-    # return False
+# def is_pickle_dump(node, logger):
+#     return(
+#         isinstance(node, ast.Assign) and
+#         isinstance(node.value, ast.Call) and
+#         isinstance(node.value.func, ast.Attribute) and
+#         isinstance(node.value.func.value, ast.Name) and
+#         node.value.func.value.id == "pickle" and
+#         node.value.func.attr == "dump"
+#     )
 
-def is_pickle_load(node, logger):
-    #with open('file.pickle', 'rb') as f:
-    #    data = pickle.load(f)
-     return(
-        isinstance(node, ast.Assign) and
-        isinstance(node.value, ast.Call) and
-        isinstance(node.value.func, ast.Attribute) and
-        isinstance(node.value.func.value, ast.Name) and
-        node.value.func.value.id == "pickle" and
-        node.value.func.attr == "load"
-    )
+
+# def is_pickle_load(node, logger):
+#     #with open('file.pickle', 'rb') as f:
+#     #    data = pickle.load(f)
+#      return(
+#         isinstance(node, ast.Assign) and
+#         isinstance(node.value, ast.Call) and
+#         isinstance(node.value.func, ast.Attribute) and
+#         isinstance(node.value.func.value, ast.Name) and
+#         node.value.func.value.id == "pickle" and
+#         node.value.func.attr == "load"
+#     )
 
 def get_output_file_info(func_node, logger):
     output_file_name = None
@@ -248,12 +240,44 @@ def is_output_file_name(node, logger):
         isinstance(node.value, ast.Constant)
     )
 
+def is_arg_assign(node, arg, logger):
+    return (
+        isinstance(node, ast.Assign) and
+        len(node.targets) == 1 and
+        isinstance(node.value, ast.Name) and
+        node.value.id == arg        
+    )
+
+def extract_positional_args(func_node):
+    args = func_node.args
+    positional_args = []
+
+    # Handle posonlyargs (Python 3.8+)
+    posonlyargs = getattr(args, "posonlyargs", [])
+    # Regular args (positional-or-keyword)
+    regular_args = args.args
+
+    # Combine all positional args
+    all_positional_args = posonlyargs + regular_args
+
+    # Defaults apply to the last N positional args
+    num_defaults = len(args.defaults)
+    num_total = len(all_positional_args)
+    num_without_defaults = num_total - num_defaults
+
+    # Extract only the ones without defaults
+    for i in range(num_without_defaults):
+        positional_args.append(all_positional_args[i].arg)
+
+    return positional_args
+
+
 def get_func_args_metadata(func_node, logger):
-    func_args = [f.arg for f in func_node.args.args]
+    func_args = extract_positional_args(func_node)
     func_args_metadata = {}
     output_arg_metadata = {}
     upstream_node = get_upstream_assign(func_node, func_args, logger)
-    var_mapping = get_is_variable_mapping(func_node, func_args, logger)
+    var_mapping = †(func_node, func_args, logger)
     filesystem_assign = get_filesystem_assign(func_node, func_args, logger)
     
     for node in ast.walk(func_node):
@@ -312,6 +336,12 @@ def get_func_args_metadata(func_node, logger):
             func_args_metadata[node.value.func.value.id] = {
                 "arg_type": "output_filesystem"
             }
+        elif any(is_arg_assign(node, a, logger) for a in func_args):
+            #matches with var = ARG
+            func_args_metadata[node.value.id] = {
+                "arg_type": "arg_assign"
+            }
+            func_args.remove(node.value.id)
 
         elif(False):
             if (is_hpc_launch(node, upstream_node, func_args, logger)): 
@@ -527,33 +557,24 @@ def remove_foundry_artifacts(func, logger):
     ast.fix_missing_locations(func)
     
     return func
-def is_select_path_collect(node, logger):
-    return (        
-        isinstance(node, ast.Assign) and
-        isinstance(node.value, ast.Call) and
-        isinstance(node.value.func, ast.Attribute) and
-        isinstance(node.value.func.value, ast.Call) and
-        isinstance(node.value.func.value.func, ast.Attribute) and
-        node.value.func.value.func.attr == 'select' and
-        node.value.func.attr == 'collect'
-    )
-def is_file_path_list(node, logger):
+
+def is_file_path_list(self, node, logger):
     return(
         isinstance(node, ast.Assign) and
         len(node.targets) == 1 and
         isinstance(node.targets[0], ast.Name) and
         node.targets[0].id == ("file_paths_list")
     )
-def is_check_if_fs_not_none(node, logger):
-    return (
-        isinstance(node, ast.If) and
-        isinstance(node.test, ast.Compare ) and
-        isinstance(node.test.left, ast.Name) and
-        node.test.left.id == "output_fs"
-    )
 class Remove_Foundry_Artifacts(NodeTransformer):
     def __init__(self, logger):
         self.logger = logger
+    def is_check_if_fs_not_none(self, node, logger):
+        return (
+            isinstance(node, ast.If) and
+            isinstance(node.test, ast.Compare ) and
+            isinstance(node.test.left, ast.Name) and
+            node.test.left.id == "output_fs"
+        )
 
     def generic_visit(self, node):
         if ( is_foundry_fs_operation(node, self.logger) or
@@ -561,8 +582,8 @@ class Remove_Foundry_Artifacts(NodeTransformer):
         ):
             return None
         elif (
-            is_check_if_fs_not_none(node, self.logger) and 
-            is_foundry_fs_with_open(node.body[0], self.logger)
+            self.is_check_if_fs_not_none(node, self.logger) and 
+            self.is_foundry_fs_with_open(node.body[0], self.logger)
         ):
             node = node.body[0]
 
@@ -598,28 +619,6 @@ def configure_pickles(func_metadata, arg, root_nodes, logger):
 
     return func_node
 
-
-# def is_check_vector(node, logger):
-#     return (
-#         isinstance(node, ast.If) and
-#         isinstance(node.test, ast.Compare) and
-#         isinstance(node.test.left, ast.Name) and
-#         node.test.left.id == 'vector_check' and
-#         len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.IsNot) and
-#         len(node.test.comparators) == 1 and isinstance(node.test.comparators[0], ast.Constant) and
-#         node.test.comparators[0].value is None
-#     )
-
-
-def is_check_vector(node, logger):
-    return(
-        isinstance(node, ast.Assign) and
-        len(node.targets) == 1 and
-        isinstance(node.targets[0], ast.Name) and
-        node.targets[0].id == 'vector_check' 
-    )
-
-
 class Configure_Pickles(NodeTransformer):
 
     def __init__(self, arg, func_metadata,root_nodes, logger):
@@ -629,6 +628,13 @@ class Configure_Pickles(NodeTransformer):
         self.arg_metadata = func_metadata["args_metadata"][arg]
         self.uses_root_node = self.arg in root_nodes
 
+    def is_check_vector(self, node, logger):
+        return(
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and
+            node.targets[0].id == 'vector_check' 
+        )
 
     def is_output_format_string(self, node):
         if ( isinstance(node, ast.Assign) and
@@ -641,6 +647,25 @@ class Configure_Pickles(NodeTransformer):
                         return True
 
         return False
+    
+    def replace_with_pickle_load(self, node, logger):
+        return (
+            (
+                is_to_pandas(node, self.logger) and
+                (
+                    (
+                        "to_pandas_var" in self.arg_metadata and
+                        node.value.func.value.id == self.arg_metadata["to_pandas_var"]
+                    ) or
+                    node.value.func.value.id == self.arg
+                )
+            ) or (
+                is_load_pickle_from_dataset(node, self.logger) and 
+                node.value.args[0].id == self.arg
+            ) or (
+                is_arg_assign(node, self.arg, self.logger)
+            )
+        )
 
     def generic_visit(self, node):
         # if self.func_metadata["name"] == "manual_phenotyping":
@@ -694,13 +719,7 @@ class Configure_Pickles(NodeTransformer):
             else:
                 self.logger.warn(f"Function has with, open: {self.func_metadata['name']}")
         
-        elif ( is_to_pandas(node, self.logger) and
-            (
-                ("to_pandas_var" in self.arg_metadata and
-                node.value.func.value.id == self.arg_metadata["to_pandas_var"]) or
-                node.value.func.value.id == self.arg
-            )
-        ):
+        elif self.replace_with_pickle_load( node, self.logger):
             target = node.targets[0].id
             
             if self.uses_root_node:
@@ -713,18 +732,6 @@ class Configure_Pickles(NodeTransformer):
                     ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)"),
                     node
                 )
-        
-        
-        elif ( is_load_pickle_from_dataset(node, self.logger) and 
-               node.value.args[0].id == self.arg
-        ):
-            
-            var_name = node.targets[0].id
-            code = f"with open({self.arg}, 'rb') as f:\n\t{var_name} = pickle.load(f)"
-            return ast.copy_location(
-                ast.parse(code).body[0],
-                node
-            )
     
         elif is_save_pickle_to_output(node, self.logger):
             
@@ -735,7 +742,7 @@ class Configure_Pickles(NodeTransformer):
                 node
             )
 
-        elif is_check_vector(node, self.logger):
+        elif self.is_check_vector(node, self.logger):
             
             # this logic already updates the nidap dataset replacement above,
             # it's easier to just set the value to True here 
@@ -756,16 +763,25 @@ def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
     
     return node
 
-
 class Configure_Load_CSV_Files(NodeTransformer):
     def __init__(self, arg, func_arg_metadata, logger):
         
         self.logger = logger
         self.func_arg_metadata = func_arg_metadata
         self.arg = arg
+    def is_select_path_collect(self, node, logger):
+        return (        
+            isinstance(node, ast.Assign) and
+            isinstance(node.value, ast.Call) and
+            isinstance(node.value.func, ast.Attribute) and
+            isinstance(node.value.func.value, ast.Call) and
+            isinstance(node.value.func.value.func, ast.Attribute) and
+            node.value.func.value.func.attr == 'select' and
+            node.value.func.attr == 'collect'
+        )
 
     def visit_Assign(self, node):
-        if (is_select_path_collect(node, self.logger) and 
+        if (self.is_select_path_collect(node, self.logger) and
             self.func_arg_metadata["arg_type"] == "foundry_fs_pickle_load"
         ):
             
@@ -1020,8 +1036,51 @@ def has_import_pandas(func_node):
                 return True
     return False
 def add_import(node):
+
     if not has_import_pickle(node):
         node.body.insert(0, ast.parse("import pickle").body[0])
     if not has_import_pandas(node):
         node.body.insert(0, ast.parse("import pandas as pd").body[0])
     return node
+
+def configure_default_vals(funcs, logger):
+    for func in funcs:
+        if "function" in funcs[func]:
+            transformer = Configure_Default_Vals(logger, funcs[func])
+            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
+            ast.fix_missing_locations(funcs[func]["function"])
+    return funcs
+
+class Configure_Default_Vals(ast.NodeTransformer):
+    def __init__(self, logger, func_metadata):
+        self.logger = logger
+        self.func_metadata = func_metadata
+
+    def is_with_spark(node):
+        return (
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            node.targets[0].id == "with_spark" and
+            isinstance(node.value, ast.Constant) and
+            node.value.value == True
+        )
+
+    def is_run_on_HPC(node):
+        return (
+            isinstance(node, ast.Assign) and
+            len(node.targets) == 1 and
+            node.targets[0].id == "run_on_HPC" and
+            isinstance(node.value, ast.Constant) and
+            node.value.value == True
+        )
+
+    def visit_Assign(self, node):
+        
+        if self.is_with_spark(node):
+            self.logger.warn(f"{self.func_metadata['name']}: Setting with_spark to False")
+            node.value = ast.Constant(value=False)
+        elif self.is_run_on_HPC(node):
+            self.logger.warn(f"{self.func_metadata['name']}: Setting run_on_HPC to False")
+            node.value = ast.Constant(value=False)
+
+        return self.generic_visit(node)
