@@ -364,7 +364,7 @@ def configure_func_calls(func_dict, func_name, arg, root_nodes, logger):
         elif func_dict[arg]["output_file_name"].endswith(".csv"):
             code = f"with open({arg}, 'r') as f:\n\t{func_call_var} = pd.read_csv(f)"
         else:
-            raise Exception(f"unknown input file type, input file: {func_dict[arg]["output_file_name"]}") 
+            raise Exception(f"unknown input file type, input file: {func_dict[arg]['output_file_name']}")
 
         func_node.body.insert(insert_index, ast.parse(code).body[0])
         
@@ -528,7 +528,7 @@ def remove_foundry_artifacts(func, logger):
     
     return func
 
-def is_file_path_list(self, node, logger):
+def is_file_path_list( node, logger):
     return(
         isinstance(node, ast.Assign) and
         len(node.targets) == 1 and
@@ -553,7 +553,7 @@ class Remove_Foundry_Artifacts(NodeTransformer):
             return None
         elif (
             self.is_check_if_fs_not_none(node, self.logger) and 
-            self.is_foundry_fs_with_open(node.body[0], self.logger)
+            is_foundry_fs_with_open(node.body[0], self.logger)
         ):
             node = node.body[0]
 
@@ -662,7 +662,7 @@ class Configure_Pickles(NodeTransformer):
             if len(open_args) == 1:
                 open_type = "rb"
                 self.logger.warn(
-                    f"No open type found\n\tfunction {self.func_metadata["name"]}"
+                    f"No open type found\n\tfunction {self.func_metadata['name']}"
                     f"is opening arg {self.arg} with no type, assigning 'rb'"
                 )
             else:
