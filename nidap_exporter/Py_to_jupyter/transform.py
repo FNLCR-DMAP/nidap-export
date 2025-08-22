@@ -3,6 +3,7 @@ from ast_code_transforms import (
     add_import,
     configure_default_args,
     configure_func_calls,
+    configure_hpc_call,
     configure_imports,
     configure_load_csv_files,
     configure_non_function_output,
@@ -179,11 +180,12 @@ def get_workbook_params(func_dict, config, branch, repo_dir, logger):
     hpc_pipelines_dir = Path(config["default"]["hpc_pipelines_dir"])
     template_script = hpc_pipelines_dir / template_script_dir
 
-    download_dir = repo_dir / "download_metadata"
+    download_dir = repo_dir / "template_params"
     download_dir.mkdir(parents=True, exist_ok=True)
     log_file = download_dir / "get_workbook_params.log"
 
     for func in func_dict:
+        logger.info(f"downloading parameters for {func}")
         (download_dir / "param_json_response.json").unlink(missing_ok=True)
         (download_dir / "node_template_parameters.json").unlink(missing_ok=True)
         rid = func_dict[func]["output_rid"]
@@ -204,7 +206,6 @@ def get_workbook_params(func_dict, config, branch, repo_dir, logger):
             raise Exception(f"Failed to get workbook params for function {func}: {result.stderr}")
             
         else:
-
             with open(download_dir / "node_template_parameters.json", 'r') as f:
                 response = f.read()
                 if response.startswith("JSON parsing error:"):    
@@ -213,8 +214,11 @@ def get_workbook_params(func_dict, config, branch, repo_dir, logger):
                         response = "No Parameters"
                     else:
                         logger.warning(f"Unexpected response format for function {func}: {response}")
-                # if response.startswith("JSON parsing error:"):
-                    # response = "No Parameters"
+                else:
+                    param_file = download_dir / f"{func_dict[func]['name']}_params.json"
+                    with open(param_file, 'w') as pf:
+                        pf.write(response)
+                    func_dict[func]["template_param_path"] = param_file
                 func_dict[func]["template_params"] = response
     
     return func_dict
@@ -239,8 +243,9 @@ def main(repo_dir, config_file_path, branch="master"):
     named_funcs = {c.name: c for c in all_code if isinstance(c, ast.FunctionDef)}
    
     func_dict, global_funcs = get_func_metadata(named_funcs.values(), repo_dir, named_funcs) 
+    
     func_dict = get_workbook_params(func_dict, config, branch, repo_dir, logger)
-    print(func_dict)
+    
     # return
     manual_datasets = get_manual_datasets(func_dict, logger)
 
@@ -266,6 +271,7 @@ def main(repo_dir, config_file_path, branch="master"):
     func_dict_cleaned = spark_to_pandas_root_nodes(func_dict_cleaned, root_nodes, logger)
     func_dict_cleaned = configure_imports(func_dict_cleaned, logger)
     func_dict_cleaned = configure_default_vals(func_dict_cleaned, logger)
+    func_dict_cleaned = configure_hpc_call(func_dict_cleaned, "./transformer_config.cfg", repo_dir, logger)
     
     ts = TopologicalSorter(dependants)
 

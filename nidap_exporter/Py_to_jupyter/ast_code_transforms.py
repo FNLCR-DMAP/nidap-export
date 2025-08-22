@@ -205,12 +205,10 @@ def is_arg_assign(node, arg, logger):
 def extract_positional_args(func_node):
     args = func_node.args
     positional_args = []
-
     # Handle posonlyargs (Python 3.8+)
     posonlyargs = getattr(args, "posonlyargs", [])
     # Regular args (positional-or-keyword)
     regular_args = args.args
-
     # Combine all positional args
     all_positional_args = posonlyargs + regular_args
 
@@ -226,9 +224,6 @@ def extract_positional_args(func_node):
     return positional_args
 
 def get_func_args_metadata(func_node, logger):
-    
-    
-    
     func_args = extract_positional_args(func_node)
     
     func_args_metadata = {}
@@ -249,9 +244,6 @@ def get_func_args_metadata(func_node, logger):
                 }
                 func_args.remove(var)
             elif( var in filesystem_assign.keys() ):
-                
-                
-                
                 #matches with {some_var} = {ARG}.filesystem()
                 # ... wtih {some_var}.open
                 func_args_metadata[filesystem_assign[var]] = {
@@ -262,7 +254,6 @@ def get_func_args_metadata(func_node, logger):
                     func_args.remove(filesystem_assign[var])
         
         elif (is_to_pandas(node, logger) ):
-            
             # matches blah = input.toPandas()
             if node.value.func.value.id in func_args:
                 func_args_metadata[node.value.func.value.id] = {
@@ -276,9 +267,7 @@ def get_func_args_metadata(func_node, logger):
                     "to_pandas_var": node.value.func.value.id
                 }
                 func_args.remove(var_mapping[node.value.func.value.id])
-      
         elif is_load_pickle_from_dataset(node, logger): #load_pickle_from_dataset
-            
             func_args_metadata[node.value.args[0].id] = {
                 "arg_type": "load_pickle_from_dataset"
             }
@@ -535,6 +524,15 @@ def is_file_path_list( node, logger):
         isinstance(node.targets[0], ast.Name) and
         node.targets[0].id == ("file_paths_list")
     )
+def is_SparkContext(node, logger):
+    return (
+        isinstance(node, ast.Assign) and
+        isinstance(node.value, ast.Call) and
+        isinstance(node.value.func, ast.Attribute) and
+        isinstance(node.value.func.value, ast.Name) and
+        node.value.func.value.id == "SparkContext"
+    )
+
 class Remove_Foundry_Artifacts(NodeTransformer):
     def __init__(self, logger):
         self.logger = logger
@@ -548,7 +546,8 @@ class Remove_Foundry_Artifacts(NodeTransformer):
 
     def generic_visit(self, node):
         if ( is_foundry_fs_operation(node, self.logger) or
-             is_get_files(node, self.logger)
+             is_get_files(node, self.logger) or
+             is_SparkContext(node, self.logger)
         ):
             return None
         elif (
@@ -692,7 +691,7 @@ class Configure_Pickles(NodeTransformer):
                     node.items[0].context_expr.func.value.id == self.arg_metadata["fs_var"] 
                 ):
                     node.items[0].context_expr = ast.parse(
-                        f"open({self.arg}, {open_type})"
+                        f"open({self.arg}, '{open_type}')"
                     ).body[0].value
                
 
@@ -903,22 +902,27 @@ class ImportTransformer(NodeTransformer):
         if self.is_hpc_connector_import(node, self.logger):
             return None
         return super().generic_visit(node)
-        
 
-def configure_hpc_call(funcs, logger):
+import shutil 
+def configure_hpc_call(funcs, config_path, repo_dir, logger):
+    shutil.copy("./submit_hpc_job.py", repo_dir)
+    shutil.copy("./transformer_config.cfg", repo_dir)
+
     for func in funcs:
         if "function" in funcs[func]:
-            transformer = Configure_HPC_Call(funcs[func], logger)
+            transformer = Configure_HPC_Call(funcs[func], config_path, repo_dir, logger)
             funcs[func]["function"] = transformer.visit(funcs[func]["function"])
             ast.fix_missing_locations(funcs[func]["function"])
     return funcs
 
 class Configure_HPC_Call(NodeTransformer):
 
-    def __init__(self, func_metadata, logger):
+    def __init__(self, func_metadata, config_path, repo_dir, logger):
         self.logger = logger
         self.func_metadata = func_metadata
         self.upstream_node = None
+        self.config_path = config_path
+        self.repo_dir = repo_dir
         for arg_name in func_metadata["args_metadata"]:
             if func_metadata["args_metadata"][arg_name]["arg_type"] == "hpc_launch":
                 self.upstream_node = arg_name
@@ -927,7 +931,7 @@ class Configure_HPC_Call(NodeTransformer):
         return (
             isinstance(node, ast.If) and
             isinstance(node.test, ast.Name) and
-            node.test.id == "run_on_hpc"
+            node.test.id == "run_on_HPC"
         )
     
     def should_remove(self, node):
@@ -939,10 +943,15 @@ class Configure_HPC_Call(NodeTransformer):
             ) or (
 
                 isinstance(node, ast.If) and
-                isinstance(node.test, ast.Subsctript) and
+                isinstance(node.test, ast.Subscript) and
                 isinstance(node.test.value, ast.Name) and
                 node.test.value.id == "monitor_result" 
             ) or self.is_input_file_name(node)
+            or (
+                isinstance(node, ast.Return) and
+                isinstance(node.value, ast.Constant) and 
+                node.value.value == None
+            )
         )
     
     def is_input_file_name(self, node):
@@ -961,25 +970,46 @@ class Configure_HPC_Call(NodeTransformer):
             isinstance(node.targets[0], ast.Name) and
             node.targets[0].id == "upstream_node" 
         )
+    def is_pickle_load_upstream_node(self, node):
+        return(
+            isinstance(node, ast.Module) and 
+            isinstance(node.body[0], ast.With) and
+            isinstance(node.body[0].body[0], ast.Assign) and
+            len(node.body[0].body[0].targets) == 1 and
+            node.body[0].body[0].targets[0].id == "upstream_node"
+        )
+    
     
     def generic_visit(self, node):
         
         if self.is_if_run_on_hpc_block(node):
             new_body = []
+            new_body.append(ast.parse("from submit_hpc_job import submit_hpc_job").body[0])
             input_file_var = ""
             for child in node.body:
                 if self.should_remove(child):
                     continue
-                elif self.is_upstream_node(child):
-                    input_file_var = child.value.id
+                elif self.is_pickle_load_upstream_node(child):\
+                    input_file_var = child.body[0].items[0].context_expr.args[0].id
                 else: 
                     new_body.append(child)
             
+            # input_file_var = se÷lf.func_metadata[""]
+            # new_body.append(ast.parse(f'''input_file_name={input_file_var}''').body[0])
+            if not input_file_var:
+                raise Exception("Input file variable not found in HPC run block")
             
-            new_body.append(ast.parse(f'''input_file_name={input_file_var}''').body[0])
-            new_body.append(
-                
-            )
+            new_body.append(ast.parse(
+                f"submit_hpc_job("\
+                f"{input_file_var}, "\
+                f"template_code, hpc_mode, "\
+                f"'{self.func_metadata['name']}', "\
+                f"'{self.repo_dir}', "\
+                f"'{self.config_path}', "\
+                f"'{self.func_metadata.get('template_param_path', '')}', "\
+                f"'{self.func_metadata.get('output_file_name', '')}'"\
+                ")"
+            ).body[0])
             node.body = new_body
                 
         
@@ -1060,8 +1090,9 @@ class Configure_Default_Vals(ast.NodeTransformer):
             self.logger.warn(f"{self.func_metadata['name']}: Setting with_spark to False")
             node.value = ast.Constant(value=False)
         elif self.is_run_on_HPC(node):
-            self.logger.warn(f"{self.func_metadata['name']}: Setting run_on_HPC to False")
-            node.value = ast.Constant(value=False)
+            # self.logger.warn(f"{self.func_metadata['name']}: Setting run_on_HPC to False")
+            # node.value = ast.Constant(value=False)
+            pass
 
         return self.generic_visit(node)
     

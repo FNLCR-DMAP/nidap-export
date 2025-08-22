@@ -89,14 +89,17 @@ def get_cell_markdown_text(func, dependants):
         child_text += "\n\n"
     # print(f"\t{parent_text}")
     # print(f"\t{child_text}")
-    parameter_text = "Parameters\n\n"
-    
-    try:
-        params = json.loads(func["template_params"])
-        for key, value in params.items():
-            parameter_text += f" - {key}: {value}\n\n"
-    except:
-        parameter_text = func["template_params"]
+    if "template_params" in func:
+        parameter_text = "Parameters\n\n"
+        
+        try:
+            params = json.loads(func["template_params"])
+            for key, value in params.items():
+                parameter_text += f" - {key}: {value}\n\n"
+        except:
+            parameter_text = func["template_params"]
+    else:
+        parameter_text = ""
     return f"{link}{header_text}{parent_text}{child_text}{parameter_text}"
         
 def dag_to_jupyter(
@@ -119,6 +122,7 @@ def dag_to_jupyter(
         "import plotly.io as pio\n"\
         "pio.renderers.default = 'notebook'"
     ))
+    cells.append(nbf.v4.new_code_cell("%load_ext autoreload\n%autoreload 2"))
 
     cells.append(nbf.v4.new_markdown_cell("# Input Data"))
     opening_code_text = "import pandas as pd\n" 
