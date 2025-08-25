@@ -55,8 +55,6 @@ def is_foundry_fs_with_open(node, logger):
         node.items[0].context_expr.func.attr == "open" 
     )
 
-
-
 def get_output_file_info(func_node, logger):
     output_file_name = None
     output_var_name = None
@@ -66,8 +64,6 @@ def get_output_file_info(func_node, logger):
             output_var_name = node.targets[0].id
     
     return output_file_name, output_var_name
-            
-
 
 def get_upstream_assign(func_node, args, logger):
     
@@ -101,18 +97,10 @@ def get_is_variable_mapping(func_node, arg_list, logger):
             isinstance(node, ast.Assign) and
             len(node.targets) == 1 and
             isinstance(node.targets[0], ast.Name) and
-            # (
-            #     node.targets[0].id == "df" or 
-            #     node.targets[0].id == "dataframe" or
-            #     node.targets[0].id == "input_dataset" or
-            #     node.targets[0].id == "phenotypes" or
-            #     node.targets[0].id == "NIDAP_dataset" 
-            # ) and
             isinstance(node.value, ast.Name) and
             node.value.id in arg_list
         ):
             mapping[node.targets[0].id] = node.value.id 
-    # 
     return mapping
 
 def is_to_pandas(node, logger):
@@ -123,7 +111,6 @@ def is_to_pandas(node, logger):
         node.value.func.attr == "toPandas"
         )
     
-
 def get_fun_call_args(node, logger):
     
     pos_args = []
@@ -177,7 +164,6 @@ def is_get_filesystem(node, logger):
         node.value.func.attr == "filesystem"
     )
 def is_get_files(node, logger):
-
     return (
         isinstance(node, ast.Assign) and
         len(node.targets) == 1 and
@@ -377,9 +363,7 @@ def configure_func_calls(func_dict, func_name, arg, root_nodes, logger):
 def configure_default_args(func_node, logger):
     default_args = {}
     func_body = []
-    #TODO pin_colored_interactive_spatial_plot among others not working 
-    # has lines stratify_by = text_to_value('None', param_name='Stratify By')
-    #.          defined_color_map = text_to_value('_spac_colors', param_name='Define Label Color Mapping')
+
     default_param_end_index = 0
     import_end_index = get_import_end_index(func_node, logger)
 
@@ -558,463 +542,8 @@ class Remove_Foundry_Artifacts(NodeTransformer):
 
         return super().generic_visit(node)
 
-def configure_pickles(func_metadata, arg, root_nodes, logger):
-    
-    
-    func_node = func_metadata["function"]
-
-    transformer = Configure_Pickles(arg, func_metadata, root_nodes, logger)
-    func_node = transformer.visit(func_node)
-    ast.fix_missing_locations(func_node)
-    body = []
-    # return_node = None
-
-    for node in func_node.body:
-        if is_return_variable(node, logger): #this is outside configure_pickles because we need to add a line, not modify
-                
-            return_var = node.value.id
-            new_node = ast.parse(
-                f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
-            ).body[0]
-            # logger.info(f"Adding pickle dump for {func_metadata['name']}")  
-            body.append(new_node)
-            body.append(node)
-        else:
-            body.append(node)
-    func_node.body = body
-    func_node.decorator_list = []
 
 
-
-    return func_node
-
-class Configure_Pickles(NodeTransformer):
-
-    def __init__(self, arg, func_metadata,root_nodes, logger):
-        self.logger = logger
-        self.arg = arg
-        self.func_metadata = func_metadata
-        self.arg_metadata = func_metadata["args_metadata"][arg]
-        self.uses_root_node = self.arg in root_nodes
-
-    def is_check_vector(self, node, logger):
-        return(
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.targets[0], ast.Name) and
-            node.targets[0].id == 'vector_check' 
-        )
-
-    def is_output_format_string(self, node):
-        if ( isinstance(node, ast.Assign) and
-             isinstance(node.value, ast.JoinedStr)
-        ):
-            fmt_values = [v for v in node.value.values if isinstance(v, ast.FormattedValue)]
-            for v in fmt_values:
-                for n in ast.walk(v):
-                    if isinstance(n, ast.Name) and n.id == "Transforms":
-                        return True
-
-        return False
-    
-    def should_replace_with_pickle_load(self, node, logger):
-        return (
-            (
-                is_to_pandas(node, self.logger) and
-                (
-                    (
-                        "to_pandas_var" in self.arg_metadata and
-                        node.value.func.value.id == self.arg_metadata["to_pandas_var"]
-                    ) or
-                    node.value.func.value.id == self.arg
-                )
-            ) or (
-                is_load_pickle_from_dataset(node, self.logger) and 
-                node.value.args[0].id == self.arg
-            ) or (
-                is_arg_assign(node, self.arg, self.logger)
-            )
-        )
-
-    def generic_visit(self, node):
-        # if self.func_metadata["name"] == "manual_phenotyping":
-            # self.logger.info(f"visit {ast.unparse(node)}")
-
-        if is_output_file_name(node, self.logger):
-    
-            node.value.value = self.func_metadata["output_file_name"]
-        elif self.is_output_format_string(node):
-            node.value = ast.Constant(f"{node.value.values[0].value}{self.func_metadata['name']}.png")
-        elif is_foundry_fs_with_open(node, self.logger) and len(node.body) == 1:
-            
-            #with {}.open(..., 'w'/'wb') as f
-            #    pickle.dump() OR df.to_csv(f)
-            # #with {}.open(..., 'r','rb') as f
-            #    pickle.load 
-            # if the pickle op is a dump, OR to_csv we need to check the output file path#
-            #        #if the argument to open is a variable, we need to check the #
-            # if the pickle op is a load, we need to configure the arg #
-            #     this includes updating the open() arg to the input variable#
-
-            
-            open_args = node.items[0].context_expr.args
-            if len(open_args) == 1:
-                open_type = "rb"
-                self.logger.warn(
-                    f"No open type found\n\tfunction {self.func_metadata['name']}"
-                    f"is opening arg {self.arg} with no type, assigning 'rb'"
-                )
-            else:
-                open_type = open_args[1].value
-
-            if open_type.startswith("w"):
-                open_type = "wb"
-                if not isinstance(node.items[0].context_expr.args[0], ast.Name): # is not a variable
-                    new = ast.parse(
-                        f"open('{self.func_metadata['output_file_name']}', '{open_type}')"
-                    ).body[0].value
-                    node.items[0].context_expr = new
-                else:
-                    file_name = node.items[0].context_expr.args[0]
-                    new = ast.parse(
-                        f"open({file_name.id}, '{open_type}')"
-                    ).body[0].value
-                    node.items[0].context_expr = new
-
-        
-            elif open_type.startswith("r"):
-                open_type = "rb"
-                #reading in a dataset
-                if (
-                    "fs_var" in self.arg_metadata and  
-                    isinstance(node.items[0].context_expr.func.value, ast.Name) and
-                    node.items[0].context_expr.func.value.id == self.arg_metadata["fs_var"] 
-                ):
-                    node.items[0].context_expr = ast.parse(
-                        f"open({self.arg}, '{open_type}')"
-                    ).body[0].value
-               
-
-        
-        elif self.should_replace_with_pickle_load( node, self.logger):
-            target = node.targets[0].id
-            
-            if self.uses_root_node:
-                return ast.copy_location (
-                    ast.parse(f"{target} = {self.arg}"),
-                    node
-                )
-            else:
-                return ast.copy_location ( 
-                    ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)"),
-                    node
-                )
-    
-        elif is_save_pickle_to_output(node, self.logger):
-            
-            code = f"with open('{self.func_metadata['output_file_name']}', 'wb') as f:"\
-                   f"\n\tpickle.dump({node.value.args[1].id}, f)"
-            return ast.copy_location(
-                ast.parse(code).body[0],
-                node
-            )
-
-        elif self.is_check_vector(node, self.logger):
-            
-            # this logic already updates the nidap dataset replacement above,
-            # it's easier to just set the value to True here 
-            node.value = ast.Constant(value=True)
-            
-        
-            
-
-        return super().generic_visit(node)
-
-def configure_load_csv_files(node,  arg, func_arg_metadata, logger):
-
-    transformer = Configure_Load_CSV_Files(arg, func_arg_metadata, logger)
-    # 
-    node = transformer.visit(node)
-    # 
-    ast.fix_missing_locations(node)
-    
-    return node
-
-class Configure_Load_CSV_Files(NodeTransformer):
-    def __init__(self, arg, func_arg_metadata, logger):
-        
-        self.logger = logger
-        self.func_arg_metadata = func_arg_metadata
-        self.arg = arg
-    def is_select_path_collect(self, node, logger):
-        return (        
-            isinstance(node, ast.Assign) and
-            isinstance(node.value, ast.Call) and
-            isinstance(node.value.func, ast.Attribute) and
-            isinstance(node.value.func.value, ast.Call) and
-            isinstance(node.value.func.value.func, ast.Attribute) and
-            node.value.func.value.func.attr == 'select' and
-            node.value.func.attr == 'collect'
-        )
-
-    def visit_Assign(self, node):
-        if (self.is_select_path_collect(node, self.logger) and
-            self.func_arg_metadata["arg_type"] == "foundry_fs_pickle_load"
-        ):
-            
-            new_node = ast.parse(f"file_paths_list = {self.arg}").body[0]
-
-            return ast.copy_location(new_node, node)
-        
-        if is_file_path_list(node, self.logger):
-            return None
-        return self.generic_visit(node)
-
-    def visit_With(self, node):
-        if is_foundry_fs_with_open(node, self.logger):
-            withitem = node.items[0]
-            new_node = ast.Call(
-                func=ast.Name(id='open', ctx=ast.Load()),
-                args=[
-                    withitem.context_expr.args[0],  # file_name
-                    ast.Constant(value='r')
-                ],
-                keywords=[]
-            )
-            withitem.context_expr = new_node
-        return self.generic_visit(node)
-    
-
-def spark_to_pandas_root_nodes(funcs, root_nodes, logger):
-    for node in root_nodes:
-        if "function" in funcs[node]:
-            transformer = SparkToPandasTransformer()
-            funcs[node]["function"] = transformer.visit(funcs[node]["function"])
-            ast.fix_missing_locations(funcs[node]["function"])
-    
-    return funcs
-
-    
-class SparkToPandasTransformer(ast.NodeTransformer):
-    def __init__(self):
-        self.columns = []
-
-    def visit_FunctionDef(self, node):
-        new_body = []
-
-        for stmt in node.body:
-            # Detect schema assignment and extract column names
-            if (
-                isinstance(stmt, ast.Assign) and
-                isinstance(stmt.value, ast.Call) and
-                isinstance(stmt.value.func, ast.Name) and
-                stmt.value.func.id == 'StructType'
-            ):
-                # Extract column names from StructField
-                fields = stmt.value.args[0].elts
-                self.columns = [
-                    field.args[0].value
-                    for field in fields
-                    if isinstance(field, ast.Call) and field.func.id == 'StructField'
-                ]
-                continue  # Skip adding this line to the new body
-
-            # Replace Spark createDataFrame return with pd.DataFrame
-            elif isinstance(stmt, ast.Return):
-                spark_call = stmt.value
-                if (
-                    isinstance(spark_call, ast.Call) and
-                    isinstance(spark_call.func, ast.Attribute) and
-                    spark_call.func.attr == 'createDataFrame'
-                ):
-                    data_arg = spark_call.args[0]
-                    new_call = ast.Call(
-                        func=ast.Attribute(
-                            value=ast.Name(id='pd', ctx=ast.Load()),
-                            attr='DataFrame',
-                            ctx=ast.Load()
-                        ),
-                        args=[],
-                        keywords=[
-                            ast.keyword(arg='data', value=data_arg),
-                            ast.keyword(
-                                arg='columns',
-                                value=ast.List(
-                                    elts=[ast.Constant(value=col) for col in self.columns],
-                                    ctx=ast.Load()
-                                )
-                            )
-                        ]
-                    )
-                    new_body.append(ast.Return(value=new_call))
-                    continue  # Done with this stmt
-
-            # Keep anything else (just in case)
-            new_body.append(stmt)
-
-        node.body = new_body
-        return node
-    
-
-def configure_imports(funcs, logger):
-    for func in funcs:
-        if "function" in funcs[func]:
-            transformer = ImportTransformer(logger)
-            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
-            ast.fix_missing_locations(funcs[func]["function"])
-    return funcs
-
-
-class ImportTransformer(NodeTransformer):
-    def __init__(self, logger):
-        self.logger = logger
-
-    def is_code_workbook_utils_import(self, node, logger):
-        return(
-            isinstance(node, ast.ImportFrom) and
-            node.module == "code_workbook_utils.utils" 
-        )    
-
-    def is_pyspark_import(self, node, logger):
-        return(
-            isinstance(node, ast.ImportFrom) and
-            node.module == "pyspark" 
-        )    
-
-    def is_hpc_connector_import(self, node, logger):
-        return(
-            isinstance(node, ast.ImportFrom) and
-            node.module.startswith("hpc_connector_addons")
-        )
-    
-    def generic_visit(self, node):
-        if self.is_code_workbook_utils_import(node, self.logger):
-            imports = [a.name for a in node.names]
-            exclude = ["save_pickle_to_output","load_pickle_from_dataset"]
-            for e in exclude:
-                if e in imports:
-                    imports.remove(e)
-
-            node.module = "spac.templates.template_utils"
-            node.names = [ast.alias(name=i) for i in imports]
-        if self.is_pyspark_import(node, self.logger):
-            return None
-        if self.is_hpc_connector_import(node, self.logger):
-            return None
-        return super().generic_visit(node)
-
-import shutil 
-def configure_hpc_call(funcs, config_path, repo_dir, logger):
-    shutil.copy("./submit_hpc_job.py", repo_dir)
-    shutil.copy("./transformer_config.cfg", repo_dir)
-
-    for func in funcs:
-        if "function" in funcs[func]:
-            transformer = Configure_HPC_Call(funcs[func], config_path, repo_dir, logger)
-            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
-            ast.fix_missing_locations(funcs[func]["function"])
-    return funcs
-
-class Configure_HPC_Call(NodeTransformer):
-
-    def __init__(self, func_metadata, config_path, repo_dir, logger):
-        self.logger = logger
-        self.func_metadata = func_metadata
-        self.upstream_node = None
-        self.config_path = config_path
-        self.repo_dir = repo_dir
-        for arg_name in func_metadata["args_metadata"]:
-            if func_metadata["args_metadata"][arg_name]["arg_type"] == "hpc_launch":
-                self.upstream_node = arg_name
-
-    def is_if_run_on_hpc_block(self, node):
-        return (
-            isinstance(node, ast.If) and
-            isinstance(node.test, ast.Name) and
-            node.test.id == "run_on_HPC"
-        )
-    
-    def should_remove(self, node):
-        return (
-            isinstance(node, ast.Try) or (
-                isinstance(node, ast.If) and
-                isinstance(node.test, ast.Name) and
-                node.test.id == "batch_mode" 
-            ) or (
-
-                isinstance(node, ast.If) and
-                isinstance(node.test, ast.Subscript) and
-                isinstance(node.test.value, ast.Name) and
-                node.test.value.id == "monitor_result" 
-            ) or self.is_input_file_name(node)
-            or (
-                isinstance(node, ast.Return) and
-                isinstance(node.value, ast.Constant) and 
-                node.value.value == None
-            )
-        )
-    
-    def is_input_file_name(self, node):
-        return (
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.targets[0], ast.Name) and
-            node.targets[0].id.endswith("input_file_name") and
-            isinstance(node.value, ast.Constant)
-        )
-    
-    def is_upstream_node(self, node):
-        return (
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.targets[0], ast.Name) and
-            node.targets[0].id == "upstream_node" 
-        )
-    def is_pickle_load_upstream_node(self, node):
-        return(
-            isinstance(node, ast.Module) and 
-            isinstance(node.body[0], ast.With) and
-            isinstance(node.body[0].body[0], ast.Assign) and
-            len(node.body[0].body[0].targets) == 1 and
-            node.body[0].body[0].targets[0].id == "upstream_node"
-        )
-    
-    
-    def generic_visit(self, node):
-        
-        if self.is_if_run_on_hpc_block(node):
-            new_body = []
-            new_body.append(ast.parse("from submit_hpc_job import submit_hpc_job").body[0])
-            input_file_var = ""
-            for child in node.body:
-                if self.should_remove(child):
-                    continue
-                elif self.is_pickle_load_upstream_node(child):\
-                    input_file_var = child.body[0].items[0].context_expr.args[0].id
-                else: 
-                    new_body.append(child)
-            
-            # input_file_var = se÷lf.func_metadata[""]
-            # new_body.append(ast.parse(f'''input_file_name={input_file_var}''').body[0])
-            if not input_file_var:
-                raise Exception("Input file variable not found in HPC run block")
-            
-            new_body.append(ast.parse(
-                f"submit_hpc_job("\
-                f"{input_file_var}, "\
-                f"template_code, hpc_mode, "\
-                f"'{self.func_metadata['name']}', "\
-                f"'{self.repo_dir}', "\
-                f"'{self.config_path}', "\
-                f"'{self.func_metadata.get('template_param_path', '')}', "\
-                f"'{self.func_metadata.get('output_file_name', '')}'"\
-                ")"
-            ).body[0])
-            node.body = new_body
-                
-        
-        return super().generic_visit(node)
-    
 
 def has_import_pickle(func_node):
 
@@ -1051,50 +580,7 @@ def add_import(node):
         node.body.insert(0, ast.parse("import pandas as pd").body[0])
     return node
 
-def configure_default_vals(funcs, logger):
-    for func in funcs:
-        if "function" in funcs[func]:
-            transformer = Configure_Default_Vals(logger, funcs[func])
-            funcs[func]["function"] = transformer.visit(funcs[func]["function"])
-            ast.fix_missing_locations(funcs[func]["function"])
-    return funcs
 
-class Configure_Default_Vals(ast.NodeTransformer):
-    def __init__(self, logger, func_metadata):
-        self.logger = logger
-        self.func_metadata = func_metadata
-
-    def is_with_spark(self, node):
-        return (
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.targets[0], ast.Name) and
-            node.targets[0].id == "with_spark" and
-            isinstance(node.value, ast.Constant) and
-            node.value.value == True
-        )
-
-    def is_run_on_HPC(self, node):
-        return (
-            isinstance(node, ast.Assign) and
-            len(node.targets) == 1 and
-            isinstance(node.targets[0], ast.Name) and 
-            node.targets[0].id == "run_on_HPC" and
-            isinstance(node.value, ast.Constant) and
-            node.value.value == True
-        )
-
-    def visit_Assign(self, node):
-        
-        if self.is_with_spark(node):
-            self.logger.warn(f"{self.func_metadata['name']}: Setting with_spark to False")
-            node.value = ast.Constant(value=False)
-        elif self.is_run_on_HPC(node):
-            # self.logger.warn(f"{self.func_metadata['name']}: Setting run_on_HPC to False")
-            # node.value = ast.Constant(value=False)
-            pass
-
-        return self.generic_visit(node)
     
 
 def is_hpc_launch(node, has_upstream_node_assign, func_args, logger):
