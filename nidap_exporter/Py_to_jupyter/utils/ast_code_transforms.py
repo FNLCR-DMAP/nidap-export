@@ -1,4 +1,5 @@
 import ast
+from importlib.resources import files
 import pathlib
 from ast import NodeTransformer
 
@@ -55,8 +56,40 @@ def is_foundry_fs_with_open(node, logger):
         node.items[0].context_expr.func.attr == "open" 
     )
 
-def get_output_file_info(func_node, logger):
-    output_file_name = None
+def get_output_file_info(func_node, func_name, repo_dir, logger):
+    foundry_data = repo_dir / "foundry_data"
+    data_dir = foundry_data / func_name
+    
+    if data_dir.exists() and data_dir.is_dir():
+        # files = [f for f in list(data_dir.iterdir()) if f.suffix not in  [".parquet", ".log"]]
+        downloaded_files = [f for f in list(data_dir.glob(f"{func_name}-*")) if f.suffix not in  [".parquet", ".log"]]
+        combined_files = [f for f in list(data_dir.glob(f"{func_name}.*")) if f.suffix not in  [".parquet", ".log"]]
+        
+        if len(combined_files) == 1:
+            output_file_name = combined_files[0].name
+        elif len(combined_files) > 1:
+            logger.warn(f"Multiple output files found for function {func_name} in {data_dir}, defaulting to the first")
+            output_file_name = combined_files[0].name
+        else:
+            # print(f"func name {func_name}")
+            # print(files)
+            if len(downloaded_files) == 1:
+                output_file_name = downloaded_files[0].name
+            elif len(downloaded_files) > 1:
+                logger.warn(f"Multiple output files found for function {func_name} in {data_dir}")
+                output_file_name = downloaded_files[0].name
+
+    else:
+        foundry_files = list(foundry_data.glob(f"{func_name}-*"))
+        if len(foundry_files) == 1:
+            output_file_name = foundry_files[0].name
+        elif len(foundry_files) > 1:
+            logger.warn(f"Multiple foundry files found for function {func_name} in {foundry_data}")
+            output_file_name = foundry_files[0].name
+        else:
+            output_file_name = None
+    # output_file_name = None
+
     output_var_name = None
     for node in ast.walk(func_node):
         if is_output_file_name(node, logger):
@@ -209,6 +242,29 @@ def extract_positional_args(func_node):
 
     return positional_args
 
+# def get_func_args_metadata(func_node,func_metadata, logger):
+#     func_args = extract_positional_args(func_node)
+#     func_args_metadata = {}
+#     for arg in func_args:
+#         if arg not in func_metadata:
+#             pass
+#         out_file = func_metadata[arg]["output_file_name"]
+#         if out_file:
+#             ext = pathlib.Path(out_file).suffix
+#             if ext == ".pickle":
+#                 func_args_metadata[arg] = {
+#                     "arg_type": "pickle",
+#                 }
+#             elif ext == ".csv":
+#                 func_args_metadata[arg] = {
+#                     "arg_type": "csv",
+#                 }
+#             else:
+#                 logger.warn(f"unknown file type for arg {arg} with file {out_file}: {ext}, defaulting to generic_open")
+    
+#     return func_args_metadata
+
+
 def get_func_args_metadata(func_node, logger):
     func_args = extract_positional_args(func_node)
     
@@ -220,13 +276,12 @@ def get_func_args_metadata(func_node, logger):
     
     for node in ast.walk(func_node):
         if ( is_foundry_fs_with_open(node, logger) ):
-            
             # matches with {}.open:
             var = node.items[0].context_expr.func.value.id
             if var in func_args:
                 #matches with {FUNC ARG}.open:
                 func_args_metadata[var] = {
-                    "arg_type": "foundry_fs_pickle_load"
+                    "arg_type": ""
                 }
                 func_args.remove(var)
             elif( var in filesystem_assign.keys() ):
@@ -264,47 +319,25 @@ def get_func_args_metadata(func_node, logger):
                 "arg_type": "arg_assign"
             }
             func_args.remove(node.value.id)
-        # elif is_subfunction_call(node, logger):
-        #     metadata = check_sub_function_vals(node, func_args, var_mapping, logger) 
 
-        #     for key in metadata:
-        #         
-        #         func_args_metadata[key] = metadata[key]
-        #         func_args.remove(key)
         elif (
             is_get_filesystem(node, logger) and
             node.value.func.value.id not in func_args and 
             node.value.func.value.id not in var_mapping
         ):
-            
-            
             #is output_fs = output.filesystem
             func_args_metadata[node.value.func.value.id] = {
                 "arg_type": "output_filesystem"
             }
-            # func_args.remove(node.value.func.value.id)
-
-
-        elif(False):
-            if (is_hpc_launch(node, upstream_node, func_args, logger)): 
-                if upstream_node:
-                    func_args_metadata.append({
-                        "arg_name": upstream_node,
-                        "arg_type": "hpc_launch"
-                    })
-                    func_args.remove(upstream_node)
-                else:
-                    arg_name = [k for k in node.value.keywords if k.arg == "upstream_dataset"][0]
-                    func_args_metadata.append({
-                        "arg_name": arg_name,
-                        "arg_type": "hpc_launch"
-                    })
-                    func_args.remove(arg_name)
     
     if len(func_args) > 0:
         # raise Exception(f"not all args accounted for {func_node.name}\nhave {func_args} unaccounted for")
-        logger.warn(f"Function {func_node.name} not all args accounted for. \n\thave {func_args} unaccounted for")
-    
+        logger.warn(f"Function {func_node.name} not all args accounted for. \n\thave {func_args} unaccounted for, making generic open")
+        for arg in func_args:
+            func_args_metadata[arg] = {
+                "arg_type": "generic_open"
+            }
+
     return func_args_metadata
 
 def get_import_end_index (func_node, logger):
@@ -424,6 +457,7 @@ def configure_non_function_output(func_node, args_metadata, logger):
             ):
                 node.items[0].context_expr.func = ast.Name(id="open", ctx=ast.Load())
     
+    
     return func_node
 
 
@@ -493,14 +527,6 @@ def is_return_variable(node, logger):
         isinstance(node.value, ast.Name)
     )
 
-def remove_foundry_artifacts(func, logger):
-
-    transformer = Remove_Foundry_Artifacts(logger)
-    func = transformer.visit(func)
-    ast.fix_missing_locations(func)
-    
-    return func
-
 def is_file_path_list( node, logger):
     return(
         isinstance(node, ast.Assign) and
@@ -516,32 +542,6 @@ def is_SparkContext(node, logger):
         isinstance(node.value.func.value, ast.Name) and
         node.value.func.value.id == "SparkContext"
     )
-
-class Remove_Foundry_Artifacts(NodeTransformer):
-    def __init__(self, logger):
-        self.logger = logger
-    def is_check_if_fs_not_none(self, node, logger):
-        return (
-            isinstance(node, ast.If) and
-            isinstance(node.test, ast.Compare ) and
-            isinstance(node.test.left, ast.Name) and
-            node.test.left.id == "output_fs"
-        )
-
-    def generic_visit(self, node):
-        if ( is_foundry_fs_operation(node, self.logger) or
-             is_get_files(node, self.logger) or
-             is_SparkContext(node, self.logger)
-        ):
-            return None
-        elif (
-            self.is_check_if_fs_not_none(node, self.logger) and 
-            is_foundry_fs_with_open(node.body[0], self.logger)
-        ):
-            node = node.body[0]
-
-        return super().generic_visit(node)
-
 
 
 

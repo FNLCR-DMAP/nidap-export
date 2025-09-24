@@ -26,16 +26,16 @@ def submit_hpc_job(input_file_path,
                    func_name,
                    repo_path, 
                    config_path, 
-                   param_path,
+                   template_param_path,
                    output_file_name):
-    if not param_path:
+    if not template_param_path:
         raise Exception("No Parameter file path found")
     config = configparser.ConfigParser()
     config.read(config_path)
 
     job_dir = setup_job_folder(config, repo_path, func_name)
     shutil.copy(input_file_path, job_dir / "input")
-    shutil.copy(param_path, job_dir /  "input/node_template_parameters.json")
+    shutil.copy(template_param_path, job_dir /  "input/node_template_parameters.json")
     input_file_name = Path(input_file_path).name
 
     hpc_pipelines_dir = Path(config.get("default", "hpc_pipelines_dir"))
@@ -60,7 +60,7 @@ def submit_hpc_job(input_file_path,
             str(job_dir),
 
         ]
-    print(f"running command {''.join(command)}")
+    print(f"running command {' '.join(command)}")
     result = subprocess.run(
         command,
         capture_output=True,

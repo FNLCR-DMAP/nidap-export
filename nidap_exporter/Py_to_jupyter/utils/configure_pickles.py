@@ -1,43 +1,75 @@
 import ast
+from pathlib import Path
+from utils.ast_code_transforms import (
+    is_to_pandas, 
+    is_load_pickle_from_dataset, 
+    is_arg_assign, 
+    is_return_variable, 
+    is_output_file_name, 
+    is_foundry_fs_with_open, 
+    is_save_pickle_to_output,
+    get_import_end_index
+)
 
-def configure_pickles(func_metadata, arg, root_nodes, logger):
-    
-    
+
+def configure_pickles(func_dict, func_name, arg, root_nodes, logger):
+    func_metadata = func_dict[func_name]
+
     func_node = func_metadata["function"]
+    arg_type = func_metadata["args_metadata"][arg]["arg_type"]
+    if arg_type == "generic_open":
+        open_command = ast.parse(f"with open({arg}, 'rb') as f:\n\t{arg} = pickle.load(f)").body[0]
+        end_index = get_import_end_index(func_node, logger)
+        
+        # print(f"inserting open command at index {end_index}")
+        func_node.body.insert(end_index, open_command)
 
-    transformer = Configure_Pickles(arg, func_metadata, root_nodes, logger)
+    print(f"configuring pickles for function {func_metadata['name']} arg {arg}")
+
+    #TODO add foundry data path to root nodes / manual datasets
+    
+    if arg_type in ["output_filesystem"]:
+        arg_file_type = Path(func_metadata["output_file_name"]).suffix
+    else:
+        arg_file_type = Path(func_dict[arg]["output_file_name"]).suffix
+
+    transformer = Configure_Pickles(arg, func_metadata, root_nodes, arg_file_type, logger)
     func_node = transformer.visit(func_node)
     ast.fix_missing_locations(func_node)
     body = []
-    # return_node = None
 
     for node in func_node.body:
+        #TODO move this loop outside of configure_pickles, writes the tocsv twice
         if is_return_variable(node, logger): #this is outside configure_pickles because we need to add a line, not modify
-                
             return_var = node.value.id
-            new_node = ast.parse(
-                f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
-            ).body[0]
-            # logger.info(f"Adding pickle dump for {func_metadata['name']}")  
+            if func_metadata["output_file_name"].endswith(".pickle"):    
+                new_node = ast.parse(
+                    f"with open('{func_metadata['output_file_name']}', 'wb') as f:\n\tpickle.dump({return_var},f)"
+                ).body[0]
+            elif func_metadata["output_file_name"].endswith(".csv"):
+                new_node = ast.parse(
+                    f"{return_var}.to_csv('{func_metadata['output_file_name']}', index=False)"
+                ).body[0]
+                
             body.append(new_node)
             body.append(node)
         else:
             body.append(node)
     func_node.body = body
     func_node.decorator_list = []
-
-
-
     return func_node
 
 class Configure_Pickles(ast.NodeTransformer):
 
-    def __init__(self, arg, func_metadata,root_nodes, logger):
+    def __init__(self, arg, func_metadata, root_nodes, arg_file_type, logger):
         self.logger = logger
         self.arg = arg
         self.func_metadata = func_metadata
         self.arg_metadata = func_metadata["args_metadata"][arg]
         self.uses_root_node = self.arg in root_nodes
+        self.arg_file_type = arg_file_type
+        
+        
 
     def is_check_vector(self, node, logger):
         return(
@@ -59,7 +91,7 @@ class Configure_Pickles(ast.NodeTransformer):
 
         return False
     
-    def should_replace_with_pickle_load(self, node, logger):
+    def should_replace_with_load(self, node, logger):
         return (
             (
                 is_to_pandas(node, self.logger) and
@@ -79,11 +111,8 @@ class Configure_Pickles(ast.NodeTransformer):
         )
 
     def generic_visit(self, node):
-        # if self.func_metadata["name"] == "manual_phenotyping":
-            # self.logger.info(f"visit {ast.unparse(node)}")
 
         if is_output_file_name(node, self.logger):
-    
             node.value.value = self.func_metadata["output_file_name"]
         elif self.is_output_format_string(node):
             node.value = ast.Constant(f"{node.value.values[0].value}{self.func_metadata['name']}.png")
@@ -135,10 +164,8 @@ class Configure_Pickles(ast.NodeTransformer):
                     node.items[0].context_expr = ast.parse(
                         f"open({self.arg}, '{open_type}')"
                     ).body[0].value
-               
 
-        
-        elif self.should_replace_with_pickle_load( node, self.logger):
+        elif self.should_replace_with_load( node, self.logger):
             target = node.targets[0].id
             
             if self.uses_root_node:
@@ -147,10 +174,22 @@ class Configure_Pickles(ast.NodeTransformer):
                     node
                 )
             else:
-                return ast.copy_location ( 
-                    ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)"),
+                if self.arg_file_type == ".pickle":
+                    open_statement = ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)")
+                elif self.arg_file_type == ".csv":
+                    open_statement = ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pd.read_csv(f)")
+                else:
+                    self.logger.warn(
+                        f"Unknown file type {self.arg_file_type} for argument {self.arg} in function {self.func_metadata['name']}, "
+                        "defaulting to pickle load"
+                    )
+                    open_statement = ast.parse(f"with open({self.arg}, 'rb') as f:\n\t{target} = pickle.load(f)")
+                
+                return ast.copy_location(
+                    open_statement,
                     node
                 )
+                 
     
         elif is_save_pickle_to_output(node, self.logger):
             

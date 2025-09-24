@@ -1,6 +1,6 @@
-import ast 
+import ast
 import json
-def get_dependents(funcs):
+def get_dependents(funcs, to_make_root=[]):
     output_to_func = {}
     for func_name in funcs:
         out_rid = funcs[func_name]["output_rid"]
@@ -33,6 +33,8 @@ def get_dependents(funcs):
         has_parent = any([d for d in dependents if has_child_func in dependents[d]])
         if not has_parent:
             root_nodes.append(has_child_func)
+    
+    root_nodes.extend(to_make_root)
     
     return dependents, root_nodes
 
@@ -101,14 +103,49 @@ def get_cell_markdown_text(func, dependants):
     else:
         parameter_text = ""
     return f"{link}{header_text}{parent_text}{child_text}{parameter_text}"
-        
+
+def format_path(path):
+
+    if isinstance(path, list):
+        return str([str(p) for p in path])
+    else:
+        return f"'{str(path)}'"
+    
+def get_foundry_data_path(node, repo_dir, logger):
+    foundry_data = repo_dir / "foundry_data"
+    node_path = foundry_data / node
+    # if not node_path.exists():
+    #     logger.warn(f"could not find expected input data file {node_path}, ")
+    #     return "/path/to/your/datafile"
+    if node_path.is_dir():
+        csv_path = node_path / f"{node}.csv"
+        if csv_path.exists():
+            return format_path(csv_path)
+        else:
+            return format_path([ str(n) for n in node_path.glob("*.csv")])
+    
+    node_file_path = list(foundry_data.glob(f"{node}-*.*"))
+    if len(node_file_path) == 0:
+        logger.warn(f"could not find expected input data file {node_path}, ")
+        return format_path("/path/to/your/datafile")
+    elif len(node_file_path) > 1:
+        logger.warn(f"found multiple files for expected input data file {node_path}")
+        return format_path(node_file_path[0])
+    else:
+        return format_path(node_file_path[0])
+            
+
 def dag_to_jupyter(
+        
         func_order, 
         all_funcs, 
         root_nodes, 
         global_func_list, 
         notebook_file_path, 
-        dependants
+        dependants,
+        repo_dir,
+        logger,
+        to_make_root=[]
     ):
 
     import nbformat as nbf
@@ -132,15 +169,25 @@ def dag_to_jupyter(
             opening_code_text += "\n"
             all_funcs[node]["function"].name = f"get_{node}"
             all_funcs[node]["function"].decorator_list = []
-            opening_code_text += ast.unparse(all_funcs[node]["function"])
-            opening_code_text += f"\n{node} = get_{node}()"
+            if node in to_make_root:
+                all_funcs[node]["function"].args = []
+                opening_code_text += '# this function was specified to be a manual input, see the subsequent functions on how to handle this\n'
+                opening_code_text += '# this is the original code\n'
+                opening_code_text += "'''\n"
+                opening_code_text += ast.unparse(all_funcs[node]["function"])
+                opening_code_text += "'''\n"
+                opening_code_text += f"{all_funcs[node]['function'].name} = {get_foundry_data_path(node, repo_dir, logger)}\n"
+            else:
+                opening_code_text += ast.unparse(all_funcs[node]["function"])
+                opening_code_text += f"\n{node} = get_{node}()"
+            
             opening_code_text += f"\n"
             
             if node in func_order:
                 func_order.remove(node)
         else:
-            opening_code_text += f"\n{node} = /path/to/your/data\n"
-    
+            
+            opening_code_text += f"\n{node} = {get_foundry_data_path(node, repo_dir, logger)}\n"
     cells.append(nbf.v4.new_code_cell(opening_code_text))
     cells.append(nbf.v4.new_markdown_cell("# Code"))
 
